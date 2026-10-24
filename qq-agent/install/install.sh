@@ -33,6 +33,19 @@ as_root() {
   fi
 }
 
+# 安装失败时打印的系统诊断信息
+diagnose_system() {
+  echo "${c_dim}--- 诊断信息 ---${c_off}"
+  echo "系统: $( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-未知}" )  架构: $(uname -m)  用户: $(id -un)"
+  echo "磁盘:"; df -h / "$HOME" 2>/dev/null | sed 's/^/  /'
+  local d
+  for d in /etc /var/lib/dpkg "$HOME"; do
+    if touch "$d/.qqa-write-test" 2>/dev/null; then rm -f "$d/.qqa-write-test"; echo "$d 可写"; else echo "$d 不可写(只读或无权限)"; fi
+  done
+  echo "dpkg 状态异常的包:"; dpkg --audit 2>&1 | head -8 | sed 's/^/  /'
+  echo "${c_dim}----------------${c_off}"
+}
+
 # ---------- 0. 环境检查 ----------
 step "检查环境"
 [ "$(uname -s)" = Linux ] || die "只支持 Linux"
@@ -40,6 +53,9 @@ case "$(uname -m)" in x86_64|aarch64) ;; *) die "不支持的架构 $(uname -m)"
 command -v apt-get >/dev/null 2>&1 || warn "没有 apt-get,系统依赖需要你手动安装(xvfb、ffmpeg、jq、unzip 等)"
 [ "$(id -u)" -ne 0 ] || warn "正在以 root 运行,建议用普通用户安装(QQ 和 NapCat 会装在当前用户的目录里)"
 mkdir -p "$DATA_DIR/logs" "$BIN_DIR"
+# 全部输出同时写进日志文件,出问题时把它发给开发者
+exec > >(tee -a "$DATA_DIR/logs/install.log") 2>&1
+echo "安装日志: $DATA_DIR/logs/install.log"
 
 # ---------- 1. 系统依赖 ----------
 step "安装系统依赖"
@@ -49,7 +65,9 @@ elif command -v apt-get >/dev/null 2>&1; then
   if as_root apt-get update -y -qq && as_root apt-get install -y -qq git curl unzip jq ffmpeg xvfb xauth ca-certificates; then
     echo "完成"
   else
-    warn "apt 安装失败(没有权限或系统目录只读?)。请手动安装 git curl unzip jq ffmpeg xvfb xauth 后加 QQA_SKIP_DEPS=1 重新运行。ffmpeg 缺失时,动图和视频的内容识别会退化。"
+    warn "apt 安装失败(没有权限、系统目录只读,或 dpkg 状态异常)。先继续往下装,稍后会检查缺了什么。"
+    diagnose_system
+    QQA_SKIP_DEPS=1   # NapCat 官方脚本也会用 apt,同样会失败,所以让它跳过
   fi
 fi
 for t in curl unzip jq git; do command -v "$t" >/dev/null 2>&1 || die "缺少 $t,请先安装"; done
@@ -117,9 +135,17 @@ else
   curl -fsSL "$NAPCAT_INSTALLER_URL" -o "$TMP/napcat.sh"
   NC_ARGS=(--docker n --cli n --force)
   [ "${QQA_SKIP_DEPS:-0}" = 1 ] && NC_ARGS+=(--skip-deps)
-  (cd "$TMP" && TERM="${TERM:-xterm}" bash napcat.sh "${NC_ARGS[@]}")
+  if ! (cd "$TMP" && TERM="${TERM:-xterm}" bash napcat.sh "${NC_ARGS[@]}"); then
+    diagnose_system
+    die "NapCat 官方安装脚本失败。看上面的报错;如果是 apt/dpkg 的问题,先手动装好依赖(xvfb xauth libnss3 libgbm1 libgtk-3-0 libasound2 等)再用 QQA_SKIP_DEPS=1 重新运行。日志: $DATA_DIR/logs/install.log"
+  fi
 fi
 [ -x "$QQ_BIN" ] || die "QQ 安装失败: 找不到 $QQ_BIN"
+MISSING_LIBS="$(ldd "$QQ_BIN" 2>/dev/null | awk '/not found/ {print $1}' | sort -u | tr '\n' ' ')"
+if [ -n "$MISSING_LIBS" ]; then
+  warn "QQ 缺少这些系统库,启动会失败: $MISSING_LIBS"
+  warn "请安装对应的包(Ubuntu 一般是 libnss3 libgbm1 libgtk-3-0 libasound2 libxss1 libatk-bridge2.0-0 等),装好后运行 qq-agent restart napcat"
+fi
 
 # ---------- 6. 配置 ----------
 step "写入配置"

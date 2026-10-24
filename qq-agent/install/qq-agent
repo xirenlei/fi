@@ -27,7 +27,15 @@ have_systemd() { systemctl --user show-environment >/dev/null 2>&1; }
 run_service() {
   case "$1" in
     napcat)
-      exec xvfb-run -a "$QQ_BIN" --no-sandbox ;;
+      if command -v xvfb-run >/dev/null 2>&1; then
+        exec xvfb-run -a "$QQ_BIN" --no-sandbox
+      elif [ -n "${DISPLAY:-}" ]; then
+        echo "没有 xvfb-run,改用当前桌面显示 $DISPLAY(QQ 窗口会出现在桌面上,不要关掉)" >&2
+        exec "$QQ_BIN" --no-sandbox
+      else
+        echo "错误:没有 xvfb-run,也没有可用的桌面显示。请安装 xvfb 和 xauth。" >&2
+        exit 1
+      fi ;;
     opencode)
       mkdir -p "$WORKDIR" && cd "$WORKDIR" || exit 1
       exec "$OPENCODE_BIN" serve --hostname 127.0.0.1 --port 4096 ;;
