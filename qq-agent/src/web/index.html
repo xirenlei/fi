@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QQ Agent 控制台</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mute:#6b7585;--line:#e3e6ec;--acc:#2f6bff;--ok:#1a9d55;--bad:#d64545;--warn:#c98a00}
+@media (prefers-color-scheme:dark){:root{--bg:#14171d;--card:#1c2028;--fg:#e6e9ef;--mute:#8d97a8;--line:#2b303b;--acc:#6b95ff;--ok:#42c27a;--bad:#ef6b6b;--warn:#e0a92b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 system-ui,-apple-system,"Noto Sans CJK SC","PingFang SC",sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+header h1{font-size:16px;margin:0}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{background:none;border:0;padding:6px 12px;border-radius:6px;color:var(--mute);cursor:pointer;font:inherit}
+nav button.on{background:var(--acc);color:#fff}
+main{max-width:980px;margin:0 auto;padding:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.card h2{font-size:14px;margin:0 0 12px;color:var(--mute);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.stat{padding:12px;border:1px solid var(--line);border-radius:8px}
+.stat b{display:block;font-size:20px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--bad)}
+.dot.ok{background:var(--ok)}
+label.f{display:grid;grid-template-columns:200px 1fr;gap:10px;align-items:center;margin:8px 0}
+label.f small{color:var(--mute);display:block}
+@media(max-width:640px){label.f{grid-template-columns:1fr}}
+input,select,textarea{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+input[type=checkbox]{width:auto;justify-self:start}
+.row input,.row select{width:auto;flex:1;min-width:140px}
+textarea{min-height:90px;resize:vertical}
+button.b{background:var(--acc);color:#fff;border:0;padding:7px 14px;border-radius:6px;cursor:pointer;font:inherit}
+button.b.s{background:var(--bg);color:var(--fg);border:1px solid var(--line)}
+button.b.d{background:var(--bad)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+table{width:100%;border-collapse:collapse}
+td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mute);font-weight:500}
+pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);padding:10px;border-radius:6px;max-height:480px;overflow:auto;margin:0;font:12px/1.5 ui-monospace,Menlo,monospace}
+.msg{padding:3px 0}.msg .who{color:var(--acc)}.msg.self .who{color:var(--ok)}.msg .t{color:var(--mute);font-size:12px}
+.media{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.media .it{border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px}
+.media img,.media video{width:100%;height:110px;object-fit:contain;background:var(--bg);border-radius:6px}
+.toast{position:fixed;right:16px;bottom:16px;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:8px;opacity:0;transition:.25s;pointer-events:none}
+.toast.on{opacity:1}
+.tag{display:inline-block;padding:0 6px;border-radius:4px;background:var(--bg);border:1px solid var(--line);font-size:12px;color:var(--mute)}
+.muted{color:var(--mute)}
+</style>
+</head>
+<body>
+<header>
+  <h1>QQ Agent 控制台</h1>
+  <nav id="nav"></nav>
+</header>
+<main id="main"></main>
+<div class="toast" id="toast"></div>
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return e;
+};
+const api = async (path, method = 'GET', body) => {
+  const r = await fetch(path, { method, headers: { 'content-type': 'application/json', 'x-qq-agent': '1' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+let toastTimer;
+const toast = (m) => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('on'), 2600); };
+const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast('出错:' + e.message); } };
+const fmtTime = (ts) => new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+const get = (o, path) => path.split('.').reduce((x, k) => x?.[k], o);
+const set = (o, path, v) => { const ks = path.split('.'); const last = ks.pop(); ks.reduce((x, k) => (x[k] ??= {}), o)[last] = v; };
+
+const SETTINGS = [
+  ['模型(DeepSeek)', [
+    ['llm.baseUrl', 'API 地址', 'text', { hint: '官方按量付费地址' }],
+    ['llm.apiKey', 'API Key', 'password'],
+    ['llm.model', '主模型', 'text', { hint: '聊天与工具调用' }],
+    ['llm.lightModel', '轻量模型', 'text', { hint: '群聊插嘴判定、图片描述、摘要' }],
+    ['llm.thinking.enabled', '开启思考', 'bool'],
+    ['llm.thinking.effort', '思考等级', 'select', { options: ['low', 'medium', 'high'] }],
+    ['llm.reasoningRounds', '回传思考的轮数', 'number', { hint: '只回传最近 N 轮的思考内容,更早的丢弃以省 token' }],
+    ['llm.extraBody', '额外请求参数', 'json', { hint: '合并进每次请求体的 JSON,接口参数变化时用' }],
+  ]],
+  ['人设', [['persona', '人设提示词', 'textarea']]],
+  ['群聊与表现', [
+    ['group.alwaysReplyWhenMentioned', '被 @ 或被回复时必回', 'bool'],
+    ['group.cooldownSeconds', '主动插嘴冷却(秒)', 'number'],
+    ['group.judgeContext', '判定时参考的消息数', 'number'],
+    ['behavior.typingMsPerChar', '打字速度(毫秒/字)', 'number', { hint: '0 表示不模拟打字延迟' }],
+    ['behavior.maxTypingMs', '单条最长等待(毫秒)', 'number'],
+  ]],
+  ['记忆', [['memory.windowSize', '每个会话保留的原始消息数', 'number', { hint: '更早的消息会整理成摘要' }]]],
+  ['权限', [['admins', '管理员 QQ 号', 'list', { hint: '用逗号分隔。只有管理员能让 Agent 调用 OpenCode、执行命令' }]]],
+  ['NapCat', [
+    ['napcat.wsUrl', 'WebSocket 地址', 'text'],
+    ['napcat.token', 'Token', 'password'],
+    ['napcat.webuiUrl', '管理界面地址', 'text', { hint: '扫码登录用' }],
+  ]],
+  ['OpenCode', [
+    ['opencode.workdir', '工作目录', 'text'],
+    ['opencode.baseUrl', '服务地址', 'text'],
+    ['opencode.autoStart', '没运行时自动启动', 'bool'],
+    ['opencode.bin', '可执行文件', 'text'],
+    ['opencode.model', '模型', 'text', { hint: '格式 provider/model,如 deepseek/deepseek-flash' }],
+    ['opencode.apiKey', 'DeepSeek Key', 'password', { hint: '留空则使用上面的 API Key' }],
+    ['opencode.password', '服务密码', 'password', { hint: '可选' }],
+  ]],
+  ['控制台', [['web.port', '端口', 'number', { hint: '修改后需要重启 Agent' }]]],
+];
+
+const tabs = {
+  async overview(root) {
+    const s = await api('/api/status');
+    const card = (t, body) => el('div', { class: 'stat' }, el('span', { class: 'muted' }, t), body);
+    const dot = (ok) => el('span', { class: 'dot' + (ok ? ' ok' : '') });
+    root.append(el('div', { class: 'card' }, el('h2', {}, '运行状态'), el('div', { class: 'grid' },
+      card('QQ(NapCat)', el('b', {}, dot(s.napcat.connected), s.napcat.connected ? '已连接 ' + (s.napcat.selfId ?? '') : '未连接')),
+      card('OpenCode', el('b', {}, dot(s.opencode.healthy), s.opencode.healthy ? '运行中' : '未运行', s.opencode.running ? ` · ${s.opencode.running} 个任务` : '')),
+      card('会话数', el('b', {}, s.spaces)),
+      card('记忆条数', el('b', {}, s.memories)),
+      card('图库', el('b', {}, s.media)),
+      card('已运行', el('b', {}, Math.floor(s.uptimeSec / 60) + ' 分钟')),
+    )));
+    const svc = (name, label) => el('div', { class: 'row' }, el('span', { style: 'width:90px' }, label),
+      ...['start', 'stop', 'restart'].map((a) => el('button', { class: 'b s', onclick: guard(async () => { const r = await api(`/api/services/${name}/${a}`, 'POST'); toast(r.ok ? '已执行' : '失败:' + (r.output || '')); }) }, { start: '启动', stop: '停止', restart: '重启' }[a])));
+    root.append(el('div', { class: 'card' }, el('h2', {}, '登录与服务'),
+      el('div', { class: 'row', style: 'margin-bottom:12px' },
+        el('a', { href: s.napcat.webuiUrl, target: '_blank', rel: 'noopener' }, el('button', { class: 'b' }, '打开 NapCat 管理界面(扫码登录 QQ)')),
+        el('span', { class: 'muted' }, 'QQ 小号需要在 NapCat 里扫码登录一次')),
+      svc('napcat', 'NapCat'), svc('opencode', 'OpenCode'), svc('agent', 'Agent')));
+    root.append(el('div', { class: 'card muted' }, '配置文件:' + s.configPath, el('br'), '数据目录:' + s.dataDir));
+  },
+
+  async settings(root) {
+    const cfg = await api('/api/config');
+    const inputs = [];
+    const form = el('div', {});
+    for (const [title, fields] of SETTINGS) {
+      const card = el('div', { class: 'card' }, el('h2', {}, title));
+      for (const [path, label, type, opt = {}] of fields) {
+        const v = get(cfg, path);
+        let input;
+        if (type === 'bool') input = el('input', { type: 'checkbox', checked: !!v });
+        else if (type === 'select') input = el('select', {}, opt.options.map((o) => el('option', { value: o, selected: o === v }, o)));
+        else if (type === 'textarea') { input = el('textarea', {}); input.value = v ?? ''; }
+        else if (type === 'json') { input = el('textarea', {}); input.value = JSON.stringify(v ?? {}, null, 2); }
+        else if (type === 'list') { input = el('input', { type: 'text' }); input.value = (v ?? []).join(', '); }
+        else { input = el('input', { type: type === 'number' ? 'number' : type, autocomplete: 'off' }); input.value = v ?? ''; }
+        inputs.push([path, type, input]);
+        card.append(el('label', { class: 'f' }, el('span', {}, label, opt.hint ? el('small', {}, opt.hint) : null), input));
+      }
+      form.append(card);
+    }
+    root.append(form, el('div', { class: 'row' }, el('button', { class: 'b', onclick: guard(async () => {
+      const patch = {};
+      for (const [path, type, input] of inputs) {
+        let v;
+        if (type === 'bool') v = input.checked;
+        else if (type === 'number') v = Number(input.value);
+        else if (type === 'json') v = JSON.parse(input.value || '{}');
+        else if (type === 'list') v = input.value.split(/[,\s,]+/).filter(Boolean).map(Number);
+        else v = input.value;
+        set(patch, path, v);
+      }
+      const r = await api('/api/config', 'PUT', patch);
+      toast(r.restartRequired ? '已保存。NapCat 地址/端口的修改需要重启 Agent 才生效' : '已保存并生效');
+    }) }, '保存设置')));
+  },
+
+  async spaces(root) {
+    const list = await api('/api/spaces');
+    const detail = el('div', {});
+    root.append(el('div', { class: 'card' }, el('h2', {}, '会话(群聊和私聊各算一个)'),
+      list.length ? el('table', {}, el('tr', {}, el('th', {}, '会话'), el('th', {}, '标题'), el('th', {}, '消息数'), el('th', {}, '')),
+        list.map((s) => el('tr', {}, el('td', {}, s.space), el('td', {}, s.title), el('td', {}, s.messages),
+          el('td', {}, el('button', { class: 'b s', onclick: guard(async () => {
+            const d = await api('/api/spaces/' + s.space);
+            detail.replaceChildren(el('div', { class: 'card' }, el('h2', {}, `${d.title || d.space} — 摘要`), el('pre', {}, d.summary || '(还没有摘要)')),
+              el('div', { class: 'card' }, el('h2', {}, '最近消息'), d.messages.map((m) => el('div', { class: 'msg ' + m.role }, el('span', { class: 't' }, fmtTime(m.ts) + ' '), el('span', { class: 'who' }, m.role === 'self' ? '我' : m.senderName), ': ', m.text))));
+          }) }, '查看'))))) : el('p', { class: 'muted' }, '还没有消息。')), detail);
+  },
+
+  async memories(root) {
+    const rows = await api('/api/memories');
+    const subj = el('input', { placeholder: 'global / user:QQ号 / space:g:群号' });
+    const text = el('input', { placeholder: '要记住的内容' });
+    root.append(el('div', { class: 'card' }, el('h2', {}, '添加记忆'), el('div', { class: 'row' }, subj, text,
+      el('button', { class: 'b', onclick: guard(async () => { await api('/api/memories', 'POST', { subject: subj.value, content: text.value }); show('memories'); }) }, '添加'))));
+    root.append(el('div', { class: 'card' }, el('h2', {}, `长期记忆(${rows.length})`),
+      rows.length ? el('table', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, '关于'), el('th', {}, '内容'), el('th', {}, '')),
+        rows.map((m) => el('tr', {}, el('td', {}, m.id), el('td', {}, el('span', { class: 'tag' }, m.subject)), el('td', {}, m.content),
+          el('td', {}, el('button', { class: 'b s', onclick: guard(async () => { await api('/api/memories/' + m.id, 'DELETE'); show('memories'); }) }, '删除'))))) : el('p', { class: 'muted' }, '还没有记忆。')));
+  },
+
+  async media(root) {
+    let kind = '', q = '';
+    const box = el('div', { class: 'media' });
+    const load = guard(async () => {
+      const items = await api(`/api/media?kind=${kind}&q=${encodeURIComponent(q)}`);
+      box.replaceChildren(...items.map((m) => el('div', { class: 'it' },
+        m.kind === 'video' ? el('video', { src: `/api/media/${m.id}/file`, controls: true, preload: 'none' }) : el('img', { src: `/api/media/${m.id}/file`, loading: 'lazy' }),
+        el('div', {}, el('b', {}, '#' + m.id + ' '), m.summary), el('div', { class: 'muted' }, m.kind + (m.tags.length ? ' · ' + m.tags.join('/') : '')),
+        el('div', { class: 'row', style: 'margin-top:6px' },
+          m.kind !== 'video' ? el('button', { class: 'b s', onclick: guard(async () => { await api('/api/media/' + m.id, 'PATCH', { kind: m.kind === 'sticker' ? 'image' : 'sticker' }); load(); }) }, m.kind === 'sticker' ? '转为图片' : '设为表情包') : null,
+          el('button', { class: 'b s', onclick: guard(async () => { await api('/api/media/' + m.id, 'DELETE'); load(); }) }, '删除')))));
+      if (!items.length) box.replaceChildren(el('p', { class: 'muted' }, '图库里还没有内容。'));
+    });
+    const sel = el('select', { onchange: (e) => { kind = e.target.value; load(); } }, [['', '全部'], ['sticker', '表情包'], ['image', '图片'], ['video', '视频']].map(([v, l]) => el('option', { value: v }, l)));
+    const search = el('input', { placeholder: '按摘要/描述/标签搜索', onchange: (e) => { q = e.target.value; load(); } });
+    root.append(el('div', { class: 'card' }, el('div', { class: 'row' }, sel, search)), el('div', { class: 'card' }, box));
+    load();
+  },
+
+  async opencode(root) {
+    const rows = await api('/api/tasks');
+    root.append(el('div', { class: 'card' }, el('h2', {}, 'OpenCode 任务'),
+      rows.length ? el('table', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, '状态'), el('th', {}, '来自'), el('th', {}, '任务'), el('th', {}, '')),
+        rows.map((t) => el('tr', {}, el('td', {}, t.id), el('td', {}, el('span', { class: 'tag' }, t.status)), el('td', {}, t.space), el('td', {}, t.prompt.slice(0, 120) + (t.result ? '\n→ ' + t.result.slice(0, 160) : '')),
+          el('td', {}, t.status === 'running' ? el('button', { class: 'b s d', onclick: guard(async () => { await api(`/api/tasks/${t.id}/abort`, 'POST'); show('opencode'); }) }, '中止') : null)))) : el('p', { class: 'muted' }, '还没有任务。')));
+  },
+
+  async logs(root) {
+    let name = 'agent';
+    const pre = el('pre', {}, '加载中…');
+    const load = guard(async () => { const r = await api(`/api/logs/${name}?lines=300`); pre.textContent = r.text || '(没有日志)'; pre.scrollTop = pre.scrollHeight; });
+    const sel = el('select', { onchange: (e) => { name = e.target.value; load(); } }, ['agent', 'napcat', 'opencode'].map((n) => el('option', { value: n }, n)));
+    root.append(el('div', { class: 'card' }, el('div', { class: 'row', style: 'margin-bottom:10px' }, sel, el('button', { class: 'b s', onclick: load }, '刷新')), pre));
+    load();
+  },
+};
+
+const NAMES = { overview: '概览', settings: '设置', spaces: '会话', memories: '记忆', media: '图库', opencode: 'OpenCode', logs: '日志' };
+let current = location.hash.slice(1) || 'overview';
+async function show(name) {
+  current = tabs[name] ? name : 'overview';
+  location.hash = current;
+  $('#nav').replaceChildren(...Object.entries(NAMES).map(([k, v]) => el('button', { class: k === current ? 'on' : '', onclick: () => show(k) }, v)));
+  const root = $('#main');
+  root.replaceChildren();
+  try { await tabs[current](root); } catch (e) { root.append(el('div', { class: 'card' }, '加载失败:' + e.message)); }
+}
+window.addEventListener('hashchange', () => { const n = location.hash.slice(1); if (n !== current && tabs[n]) show(n); });
+show(current);
+</script>
+</body>
+</html>

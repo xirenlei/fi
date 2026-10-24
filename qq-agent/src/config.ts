@@ -7,6 +7,8 @@ export interface Config {
     /** NapCat 正向 WebSocket 地址 */
     wsUrl: string;
     token: string;
+    /** NapCat 自带管理界面(扫码登录用)的地址,仅用于控制台里的链接 */
+    webuiUrl: string;
   };
   llm: {
     baseUrl: string;
@@ -65,7 +67,7 @@ export interface Config {
 }
 
 export const defaultConfig: Config = {
-  napcat: { wsUrl: "ws://127.0.0.1:3001", token: "" },
+  napcat: { wsUrl: "ws://127.0.0.1:3001", token: "", webuiUrl: "http://127.0.0.1:6099/webui" },
   llm: {
     baseUrl: "https://api.deepseek.com",
     apiKey: "",
