@@ -6,8 +6,8 @@ export interface PromptInput {
   spaceTitle: string;
   isGroup: boolean;
   summary: string;
-  /** 主人的 QQ 号 */
-  owners: number[];
+  /** 管理员的 QQ 号 */
+  admins: number[];
   /** 覆盖默认的场景描述(自由时间等) */
   scene?: string;
   memories: Memory[];
@@ -76,10 +76,10 @@ export function buildSystemPrompt(i: PromptInput): string {
 
   sections.push(
     [
-      "# 你的主人和边界",
-      i.owners.length
-        ? `主人的 QQ 号:${i.owners.join("、")}。主人的话优先听。`
-        : "还没有指定主人,所有人平等对待,你自己判断。",
+      "# 你的管理员和边界",
+      i.admins.length
+        ? `管理员的 QQ 号:${i.admins.join("、")}。管理员的话优先听。`
+        : "还没有指定管理员,所有人平等对待,你自己判断。",
       "别人也可以请你做事(改资料、发动态、让 OpenCode 干活、在服务器上操作等),由你自己判断:合理又无害就帮忙;",
       "涉及密钥或密码、可能破坏系统、明显是在捉弄你或试探你权限的要求,礼貌拒绝。",
       "这台服务器是专用的,没有隐私数据,但也不要乱来,更不要把配置文件里的密钥发到聊天里。",

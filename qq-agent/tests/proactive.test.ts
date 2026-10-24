@@ -59,11 +59,11 @@ test("调度器:关闭或安静时段不行动,否则行动;出错不会抛出",
   expect(runs).toBe(3);
 });
 
-test("提示词里有主人和边界;没有主人时平等对待", () => {
+test("提示词里有管理员和边界;没有管理员时平等对待", () => {
   const base = { persona: "p", space: "p:1", spaceTitle: "t", isGroup: false, summary: "", memories: [], otherSummaries: [], extraSections: [], now: new Date() };
-  expect(buildSystemPrompt({ ...base, owners: [10001, 10002] })).toContain("主人的 QQ 号:10001、10002");
-  expect(buildSystemPrompt({ ...base, owners: [] })).toContain("还没有指定主人");
-  expect(buildSystemPrompt({ ...base, owners: [], scene: "当前场景:自由时间" })).toContain("当前场景:自由时间");
+  expect(buildSystemPrompt({ ...base, admins: [10001, 10002] })).toContain("管理员的 QQ 号:10001、10002");
+  expect(buildSystemPrompt({ ...base, admins: [] })).toContain("还没有指定管理员");
+  expect(buildSystemPrompt({ ...base, admins: [], scene: "当前场景:自由时间" })).toContain("当前场景:自由时间");
 });
 
 function setup(script: (body: any, n: number) => ChatMessage) {

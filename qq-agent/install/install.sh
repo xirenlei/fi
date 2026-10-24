@@ -207,7 +207,7 @@ ${c_ok}安装完成。${c_off} 接下来三步:
   1. 扫码登录 QQ 小号:打开  ${WEBUI_URL}
      (也可以在控制台「概览」页点按钮)
   2. 打开控制台  http://127.0.0.1:${CONSOLE_PORT}  (桌面上的「QQ Agent」图标,或运行 qq-agent open)
-     在「设置」里填入 DeepSeek API Key,并把你自己的 QQ 号填进「主人」
+     在「设置」里填入 DeepSeek API Key,并把你自己的 QQ 号填进「管理员」
   3. 用另一个 QQ 号给小号发消息试试
 
 常用命令: qq-agent status | restart | logs agent | logs napcat | logs opencode

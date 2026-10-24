@@ -99,7 +99,7 @@ const SETTINGS = [
     ['behavior.maxTypingMs', '单条最长等待(毫秒)', 'number'],
   ]],
   ['记忆', [['memory.windowSize', '每个会话保留的原始消息数', 'number', { hint: '更早的消息会整理成摘要' }]]],
-  ['主人', [['admins', '主人的 QQ 号', 'list', { hint: '用逗号分隔。会写进提示词,主人的话优先听;不做硬性限制,别人的请求由它自己判断' }]]],
+  ['管理员', [['admins', '管理员的 QQ 号', 'list', { hint: '用逗号分隔。会写进提示词,管理员的话优先听;不做硬性限制,别人的请求由它自己判断' }]]],
   ['自主行动', [
     ['proactive.enabled', '允许自己行动', 'bool', { hint: '没人说话时,隔一段时间让它自己决定:发动态、改签名、主动找人聊天,或什么都不做' }],
     ['proactive.intervalMinutes', '平均间隔(分钟)', 'number', { hint: '实际会在 ±30% 内随机浮动,每次唤醒是一次模型请求' }],
