@@ -229,6 +229,13 @@ export class Db {
     return rows.map((r) => JSON.parse(r.messages) as T[]);
   }
 
+  /** 只保留某个空间最新的 keep 个对话轮次 */
+  trimTurns(space: string, keep: number) {
+    this.raw
+      .query("DELETE FROM turns WHERE space = $space AND id NOT IN (SELECT id FROM turns WHERE space = $space ORDER BY id DESC LIMIT $keep)")
+      .run({ $space: space, $keep: keep });
+  }
+
   deleteTurnsUpto(space: string, rowId: number) {
     this.raw.query("DELETE FROM turns WHERE space = $space AND last_row <= $row").run({ $space: space, $row: rowId });
   }

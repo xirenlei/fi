@@ -7,7 +7,6 @@ export interface ToolContext {
   space: string;
   /** 触发本轮的消息的发送者 */
   triggerSenderIds: number[];
-  isAdmin: boolean;
 }
 
 export interface Tool {

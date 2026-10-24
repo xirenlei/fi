@@ -1,4 +1,3 @@
-import { adminOnly } from "../tools/system";
 import { defineTool, type Tool } from "../agent/tools";
 import type { OpenCodeManager } from "./manager";
 
@@ -9,16 +8,16 @@ export function openCodeTools(oc: OpenCodeManager): Tool[] {
   return [
     defineTool(
       "opencode_run",
-      "把一项实际工作交给 OpenCode 去做(写代码、改文件、查资料、跑命令、排查问题等),后台异步执行,完成后会自动通知你。prompt 要写清楚目标、背景和约束。仅管理员可用。",
+      "把一项实际工作交给 OpenCode 去做(写代码、改文件、查资料、跑命令、排查问题等),后台异步执行,完成后会自动通知你。prompt 要写清楚目标、背景和约束。",
       {
         prompt: { type: "string", description: "交给 OpenCode 的完整任务描述" },
         session_id: { type: "string", description: "可选,在已有的 OpenCode 会话里继续(追问、补充需求)" },
       },
       ["prompt"],
-      adminOnly(async (a, ctx) => {
+      async (a, ctx) => {
         const task = await oc.submit(ctx.space, String(a.prompt ?? ""), a.session_id ? String(a.session_id) : undefined);
         return `已交给 OpenCode,任务 #${task.id},会话 ${task.sessionId}。完成后会通知你,不用等。`;
-      }),
+      },
     ),
     defineTool("opencode_status", "查看最近的 OpenCode 任务和状态", {}, [], () => {
       const rows = oc.tasks.recent(10);
@@ -31,10 +30,10 @@ export function openCodeTools(oc: OpenCodeManager): Tool[] {
     }),
     defineTool(
       "opencode_abort",
-      "中止一个正在运行的 OpenCode 任务。仅管理员可用。",
+      "中止一个正在运行的 OpenCode 任务。",
       { task_id: { type: "number" } },
       ["task_id"],
-      adminOnly(async (a) => ((await oc.abort(Number(a.task_id))) ? "已中止" : "没有这个运行中的任务")),
+      async (a) => ((await oc.abort(Number(a.task_id))) ? "已中止" : "没有这个运行中的任务"),
     ),
   ];
 }

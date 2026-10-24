@@ -46,8 +46,17 @@ export interface Config {
     /** 判定时附带的最近消息条数 */
     judgeContext: number;
   };
-  /** 允许让 Agent 调用 OpenCode / 执行命令的 QQ 号 */
+  /** 主人的 QQ 号,写进提示词:主人的话优先听。不做硬性的权限限制,由模型自己判断 */
   admins: number[];
+  /** 自主行动:没人说话时,隔一段时间让它自己决定做点什么(发动态、改签名、主动找人聊天等) */
+  proactive: {
+    enabled: boolean;
+    /** 平均间隔(分钟),实际会在 ±30% 内随机浮动 */
+    intervalMinutes: number;
+    /** 安静时段(含起点,不含终点,本地时间的小时),这段时间不会自己行动 */
+    quietStartHour: number;
+    quietEndHour: number;
+  };
   opencode: {
     /** OpenCode 干活的目录 */
     workdir: string;
@@ -83,6 +92,7 @@ export const defaultConfig: Config = {
   memory: { windowSize: 200 },
   group: { alwaysReplyWhenMentioned: true, cooldownSeconds: 20, judgeContext: 20 },
   admins: [],
+  proactive: { enabled: true, intervalMinutes: 120, quietStartHour: 1, quietEndHour: 8 },
   opencode: {
     workdir: "",
     baseUrl: "http://127.0.0.1:4096",

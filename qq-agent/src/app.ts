@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { Agent } from "./agent/agent";
+import { Scheduler } from "./agent/scheduler";
 import { ToolRegistry, memoryTools } from "./agent/tools";
 import { dataDir, loadConfig, type Config } from "./config";
 import { LlmClient } from "./llm/client";
@@ -12,6 +13,7 @@ import { OpenCodeManager } from "./opencode/manager";
 import { TaskStore } from "./opencode/tasks";
 import { openCodePromptSection, openCodeTools } from "./opencode/tools";
 import { accountPromptSection, accountTools } from "./tools/account";
+import { chatTools } from "./tools/chat";
 import { systemTools } from "./tools/system";
 
 export interface App {
@@ -43,6 +45,7 @@ export function createApp(cfg: Config = loadConfig()): App {
     ...openCodeTools(oc),
     ...systemTools(() => oc.workdir()),
     ...accountTools({ call: (action, params) => napcat.call(action, params), store }),
+    ...chatTools({ db, say: (space, raw) => agent.say(space, raw) }),
   ]);
   const agent = new Agent({
     cfg: () => cfg,
@@ -58,8 +61,22 @@ export function createApp(cfg: Config = loadConfig()): App {
   napcat.onEvent((ev) => agent.handleEvent(ev));
   oc.onDone = ({ task, status, result }) => {
     const head = status === "done" ? "已完成" : "失败";
-    agent.notify(task.space, `[OpenCode 任务 #${task.id} ${head}]\n任务:${task.prompt}\n结果:\n${result.slice(0, 3000)}`);
+    const text = `[OpenCode 任务 #${task.id} ${head}]\n任务:${task.prompt}\n结果:\n${result.slice(0, 3000)}`;
+    // 自己在自由时间提交的任务,没有对应的聊天可汇报,唤醒它自己处理
+    if (task.space === "self") void agent.wander(text).catch((e) => log(`wander failed: ${e}`));
+    else agent.notify(task.space, text);
   };
+
+  const scheduler = new Scheduler({
+    enabled: () => cfg.proactive.enabled,
+    intervalMinutes: () => cfg.proactive.intervalMinutes,
+    quiet: () => [cfg.proactive.quietStartHour, cfg.proactive.quietEndHour],
+    run: async () => {
+      const said = await agent.wander();
+      if (said) log(`[proactive] ${said.slice(0, 200)}`);
+    },
+    log,
+  });
 
   /** OpenCode 服务可能比 Agent 晚起来,所以重试一段时间 */
   let stopped = false;
@@ -88,11 +105,13 @@ export function createApp(cfg: Config = loadConfig()): App {
     startedAt: Date.now(),
     async start() {
       napcat.connect();
+      scheduler.start();
       // OpenCode 的准备不阻塞聊天功能
       void setupOpenCode();
     },
     async stop() {
       stopped = true;
+      scheduler.stop();
       napcat.close();
       await oc.stop();
       db.close();

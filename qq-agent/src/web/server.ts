@@ -161,6 +161,12 @@ export function startWeb(app: App, port = app.cfg.web.port) {
       }
     }
 
+    if (p === "/api/proactive/run" && m === "POST") {
+      if (!app.napcat.connected) return bad("QQ 还没连上,先登录 NapCat", 409);
+      const text = await app.agent.wander();
+      return json({ ok: true, text });
+    }
+
     if (p === "/api/tasks" && m === "GET") return json(app.oc.tasks.recent(50));
     const tk = p.match(/^\/api\/tasks\/(\d+)\/abort$/);
     if (tk && m === "POST") return json({ ok: await app.oc.abort(Number(tk[1])) });

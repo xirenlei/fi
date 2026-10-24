@@ -1,5 +1,4 @@
 import { defineTool, type Tool } from "../agent/tools";
-import { adminOnly } from "./system";
 import type { MediaStore } from "../media/store";
 import { parseSpace } from "../napcat/types";
 
@@ -26,53 +25,53 @@ export function accountTools(d: AccountDeps): Tool[] {
   return [
     defineTool(
       "set_signature",
-      "修改这个 QQ 号的个性签名。仅管理员可用。别频繁改,内容要符合你的人设。",
+      "修改这个 QQ 号的个性签名。别频繁改,内容要符合你的人设。",
       { text: { type: "string", description: "新的签名" } },
       ["text"],
-      adminOnly(async (a) => {
+      async (a) => {
         const text = str(a.text);
         if (!text) return "签名不能为空";
         await d.call("set_self_longnick", { longNick: text });
         return "签名已修改";
-      }),
+      },
     ),
     defineTool(
       "set_nickname",
-      "修改这个 QQ 号的昵称。仅管理员可用。",
+      "修改这个 QQ 号的昵称。",
       { nickname: { type: "string" } },
       ["nickname"],
-      adminOnly(async (a) => {
+      async (a) => {
         const nickname = str(a.nickname);
         if (!nickname) return "昵称不能为空";
         await d.call("set_qq_profile", { nickname });
         return "昵称已修改";
-      }),
+      },
     ),
     defineTool(
       "set_avatar",
-      "修改这个 QQ 号的头像。可以用图库里的图片编号,也可以给文件路径或 http(s) 链接。仅管理员可用。",
+      "修改这个 QQ 号的头像。可以用图库里的图片编号,也可以给文件路径或 http(s) 链接。",
       {
         media_id: { type: "number", description: "图库里的图片编号" },
         file: { type: "string", description: "文件路径或 http(s) 链接(没有 media_id 时用)" },
       },
       [],
-      adminOnly(async (a) => {
+      async (a) => {
         const file = a.media_id != null ? imagePath(a.media_id) : str(a.file);
         if (!file) return "需要 media_id 或 file";
         await d.call("set_qq_avatar", { file });
         return "头像已修改";
-      }),
+      },
     ),
     defineTool(
       "post_qzone",
-      "在 QQ 空间发一条动态(说说),可带图。图片用图库里的编号。仅管理员可用。",
+      "在 QQ 空间发一条动态(说说),可带图。图片用图库里的编号。",
       {
         content: { type: "string", description: "正文" },
         media_ids: { type: "array", items: { type: "number" }, description: "图库图片编号,最多 9 张" },
         visibility: { type: "string", enum: Object.keys(VISIBILITY), description: "public 所有人 / friends 仅好友 / self 仅自己,默认 public" },
       },
       ["content"],
-      adminOnly(async (a) => {
+      async (a) => {
         const content = str(a.content);
         if (!content) return "正文不能为空";
         const ids = Array.isArray(a.media_ids) ? a.media_ids.slice(0, 9) : [];
@@ -80,29 +79,29 @@ export function accountTools(d: AccountDeps): Tool[] {
         if (!right) return "visibility 不合法";
         const res = (await d.call("send_qzone_msg", { content, images: ids.map(imagePath), ugc_right: right })) as { tid?: string } | null;
         return `动态已发布,tid=${res?.tid ?? "未知"}`;
-      }),
+      },
     ),
     defineTool(
       "delete_qzone",
-      "删除一条自己发的 QQ 空间动态。仅管理员可用。",
+      "删除一条自己发的 QQ 空间动态。",
       { tid: { type: "string", description: "发布动态时返回的 tid" } },
       ["tid"],
-      adminOnly(async (a) => {
+      async (a) => {
         await d.call("delete_qzone_msg", { tid: str(a.tid) });
         return "已删除";
-      }),
+      },
     ),
     defineTool(
       "set_online_status",
-      "修改在线状态。仅管理员可用。",
+      "修改在线状态。",
       { status: { type: "string", enum: Object.keys(ONLINE_STATUS), description: "online 在线 / away 离开 / invisible 隐身 / busy 忙碌 / q_me Q我吧 / dnd 请勿打扰" } },
       ["status"],
-      adminOnly(async (a) => {
+      async (a) => {
         const s = ONLINE_STATUS[str(a.status)];
         if (s === undefined) return "status 不合法";
         await d.call("set_online_status", { status: s, ext_status: 0, battery_status: 0 });
         return "在线状态已修改";
-      }),
+      },
     ),
     defineTool(
       "send_like",
@@ -117,12 +116,13 @@ export function accountTools(d: AccountDeps): Tool[] {
     ),
     defineTool(
       "poke",
-      "戳一戳某人。在群里用就是群内戳,在私聊里用就是私聊戳。",
-      { user_id: { type: "number" } },
+      "戳一戳某人。在群里聊天时默认是群内戳,私聊里是私聊戳;自由时间想戳群里的人要给 group_id。",
+      { user_id: { type: "number" }, group_id: { type: "number", description: "可选,在这个群里戳" } },
       ["user_id"],
       async (a, ctx) => {
-        const sp = parseSpace(ctx.space);
-        await d.call("send_poke", { user_id: String(a.user_id), ...(sp.type === "group" ? { group_id: String(sp.id) } : {}) });
+        const sp = /^[gp]:\d+$/.test(ctx.space) ? parseSpace(ctx.space) : null;
+        const group = a.group_id ? String(a.group_id) : sp?.type === "group" ? String(sp.id) : undefined;
+        await d.call("send_poke", { user_id: String(a.user_id), ...(group ? { group_id: group } : {}) });
         return "已戳";
       },
     ),
@@ -143,7 +143,8 @@ export function accountPromptSection(): string {
   return [
     "# 管理自己的 QQ 号",
     "你可以改自己账号的资料,也可以发动态:set_nickname 改昵称、set_signature 改签名、set_avatar 换头像、post_qzone 发 QQ 空间动态(可带图库里的图)、set_online_status 改在线状态。",
-    "这些改动都会被别人看到,只有管理员要求时才做;发动态、换头像前,如果用户没给具体内容,先问清楚或给个方案让对方确认。",
+    "这是你自己的账号,这些你可以按需要做,也可以在自由时间自己想做就做(比如心情好发一条动态、换个签名)。但这些改动都会被别人看到:别太频繁,要符合你的人设;别人让你做时,觉得合理就做,内容没说清楚可以先问;换头像、发动态之前先想想有没有合适的图。",
+    "发了动态、改了签名这类事,用 remember 记一笔(subject 写 global),下次自由时间才知道自己最近做过什么,不会重复。",
     "点赞(send_like)、戳一戳(poke)、给消息贴表情(react_to_message)是轻量互动,聊天时觉得合适可以自己用,但别刷屏。",
   ].join("\n");
 }

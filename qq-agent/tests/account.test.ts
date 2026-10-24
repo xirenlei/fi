@@ -25,13 +25,11 @@ function setup() {
   const vid = store.add({ kind: "video", data: new Uint8Array([4, 5, 6]), ext: "mp4", mime: "video/mp4", summary: "视频" });
   return { reg, calls, img, vid, store, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
-const admin = { space: "g:9", triggerSenderIds: [1], isAdmin: true };
-const guest = { ...admin, isAdmin: false };
+const admin = { space: "g:9", triggerSenderIds: [1] };
+const guest = admin;
 
-test("改签名、昵称、在线状态:管理员可用,其他人被拒绝", async () => {
+test("改签名、昵称、在线状态", async () => {
   const t = setup();
-  expect(await t.reg.run("set_signature", '{"text":"今天也要开心"}', guest)).toContain("没有权限");
-  expect(t.calls).toHaveLength(0);
   await t.reg.run("set_signature", '{"text":"今天也要开心"}', admin);
   await t.reg.run("set_nickname", '{"nickname":"小助"}', admin);
   await t.reg.run("set_online_status", '{"status":"busy"}', admin);
@@ -60,22 +58,23 @@ test("发动态:正文、图片、可见范围;删除动态", async () => {
   expect(out).toContain("abc123");
   expect(t.calls[0]).toEqual(["send_qzone_msg", { content: "晚霞很美", images: [`file://${t.store.absPath(t.img)}`], ugc_right: 4 }]);
   expect(await t.reg.run("post_qzone", '{"content":"x","visibility":"bogus"}', admin)).toContain("不合法");
-  expect(await t.reg.run("post_qzone", '{"content":"x"}', guest)).toContain("没有权限");
   await t.reg.run("delete_qzone", '{"tid":"abc123"}', admin);
   expect(t.calls.at(-1)).toEqual(["delete_qzone_msg", { tid: "abc123" }]);
   t.cleanup();
 });
 
-test("点赞、戳一戳、表情回应:任何人触发都可以", async () => {
+test("点赞、戳一戳、表情回应", async () => {
   const t = setup();
   await t.reg.run("send_like", '{"user_id":5,"times":99}', guest);
   await t.reg.run("poke", '{"user_id":5}', guest);
   await t.reg.run("poke", '{"user_id":5}', { ...guest, space: "p:5" });
+  await t.reg.run("poke", '{"user_id":5,"group_id":42}', { ...guest, space: "self" });
   await t.reg.run("react_to_message", '{"message_id":77,"emoji_id":76}', guest);
   expect(t.calls).toEqual([
     ["send_like", { user_id: "5", times: 10 }],
     ["send_poke", { user_id: "5", group_id: "9" }],
     ["send_poke", { user_id: "5" }],
+    ["send_poke", { user_id: "5", group_id: "42" }],
     ["set_msg_emoji_like", { message_id: 77, emoji_id: 76, set: true }],
   ]);
   t.cleanup();

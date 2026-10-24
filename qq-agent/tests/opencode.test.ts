@@ -158,18 +158,13 @@ describe("OpenCodeManager", () => {
 });
 
 describe("工具权限", () => {
-  test("非管理员不能提交任务或执行命令", async () => {
+  test("工具不再有硬性权限限制,任何人触发都能用(靠提示词约束)", async () => {
     const oc = mockOpenCode();
     const { mgr, dir } = makeManager(oc.url);
     const reg = new ToolRegistry([...openCodeTools(mgr), ...systemTools(() => dir)]);
-    const guest = { space: "g:1", triggerSenderIds: [2], isAdmin: false };
-    expect(await reg.run("opencode_run", '{"prompt":"x"}', guest)).toContain("没有权限");
-    expect(await reg.run("shell", '{"command":"echo hi"}', guest)).toContain("没有权限");
-    expect(await reg.run("read_file", '{"path":"/etc/passwd"}', guest)).toContain("没有权限");
-    expect(mgr.tasks.recent()).toHaveLength(0);
-    const admin = { ...guest, isAdmin: true };
-    expect(await reg.run("shell", '{"command":"echo hi && pwd"}', admin)).toContain(`hi\n${dir}`);
-    expect(await reg.run("opencode_run", '{"prompt":"x"}', admin)).toContain("任务 #1");
+    const ctx = { space: "g:1", triggerSenderIds: [2] };
+    expect(await reg.run("shell", '{"command":"echo hi && pwd"}', ctx)).toContain(`hi\n${dir}`);
+    expect(await reg.run("opencode_run", '{"prompt":"x"}', ctx)).toContain("任务 #1");
   });
 
   test("shell 超时会被终止,输出过长会被截断", async () => {
@@ -178,7 +173,7 @@ describe("工具权限", () => {
     const r = await runShell("sleep 5", dir, 200);
     expect(r.timedOut).toBe(true);
     const reg = new ToolRegistry(systemTools(() => dir));
-    const out = await reg.run("shell", JSON.stringify({ command: "head -c 30000 /dev/zero | tr '\\0' a" }), { space: "p:1", triggerSenderIds: [1], isAdmin: true });
+    const out = await reg.run("shell", JSON.stringify({ command: "head -c 30000 /dev/zero | tr '\\0' a" }), { space: "p:1", triggerSenderIds: [1] });
     expect(out).toContain("中间省略");
     expect(out.length).toBeLessThan(9000);
   });

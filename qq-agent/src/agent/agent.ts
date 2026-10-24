@@ -7,8 +7,8 @@ import { displayName, parseMessage, seg, type ParsedMessage } from "../napcat/pa
 import { parseSpace, spaceOf, type OneBotEvent, type Segment, type SpaceId } from "../napcat/types";
 import { judgeReply } from "./judge";
 import { parseOutput, plainLength, type OutMessage, type OutPart } from "./output";
-import { buildSystemPrompt, formatNewMessages } from "./prompt";
-import type { ToolRegistry } from "./tools";
+import { buildSystemPrompt, formatNewMessages, formatTime } from "./prompt";
+import type { ToolContext, ToolRegistry } from "./tools";
 
 export interface NapcatLike {
   selfId?: number;
@@ -48,6 +48,16 @@ interface SpaceState {
 }
 
 const MAX_TOOL_ROUNDS = 8;
+
+const AUTONOMY_SECTION = [
+  "# 自主行动",
+  "你不只是被动回复:有人找你时你回应他们,没人找你时你也有自己的生活——发动态、改签名和状态、整理表情包、主动找朋友聊两句、跟进之前答应过的事。",
+  "但要克制:",
+  "- 主动找人要有理由(跟进某件事、分享有意思的东西、很久没聊的熟人),别无缘无故刷存在感,别连发,别在群里无话找话。",
+  "- 动态别发太频繁,内容要符合你的人设;发之前 recall 一下最近发过什么。",
+  "- 做完什么用 remember 记一笔(subject 写 global),下次才知道自己做过什么。",
+  "- 没什么想做的就什么都不做,输出 <silent/> 即可。这完全正常。",
+].join("\n");
 const MAX_PENDING = 60;
 
 export class Agent {
@@ -199,7 +209,6 @@ export class Agent {
     const firstRow = pending[0]!.id;
     const lastRow = pending.at(-1)!.id;
     const senders = [...new Set(pending.map((m) => m.senderId))];
-    const lastSender = pending.at(-1)!.senderId;
 
     const system = buildSystemPrompt({
       persona: cfg.persona,
@@ -207,6 +216,7 @@ export class Agent {
       spaceTitle: row.title,
       isGroup: parseSpace(space).type === "group",
       summary: row.summary,
+      owners: cfg.admins,
       memories: db.memoriesFor(this.memorySubjects(space, senders)).slice(-40),
       otherSummaries: db.otherSpaceSummaries(space),
       extraSections: [...(this.d.extraSections?.() ?? []), ...(this.d.media?.promptSection ? [this.d.media.promptSection()] : [])],
@@ -230,25 +240,7 @@ export class Agent {
 
     const turn: ChatMessage[] = [];
     const messages: ChatMessage[] = [{ role: "system", content: system }, ...history, liveUser];
-    const ctx = { space, triggerSenderIds: senders, isAdmin: cfg.admins.includes(lastSender) };
-    let finalText = "";
-
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const res = await this.callModel(messages, history.length + 1);
-      const msg = res;
-      turn.push(msg);
-      messages.push(msg);
-      if (!msg.tool_calls?.length) {
-        finalText = textOf(msg);
-        break;
-      }
-      for (const call of msg.tool_calls) {
-        const out = await this.d.tools.run(call.function.name, call.function.arguments, ctx);
-        const toolMsg: ChatMessage = { role: "tool", tool_call_id: call.id, content: out };
-        turn.push(toolMsg);
-        messages.push(toolMsg);
-      }
-    }
+    const finalText = await this.runLoop(messages, turn, history.length + 1, { space, triggerSenderIds: senders });
 
     db.addTurn(space, firstRow, lastRow, [storedUser, ...turn]);
     db.setCursor(space, lastRow);
@@ -263,6 +255,85 @@ export class Agent {
       await maybeSummarize(db, this.d.llm, cfg.llm.lightModel, space, cfg.memory.windowSize);
     } catch (e) {
       this.log(`summarize failed for ${space}: ${e}`);
+    }
+  }
+
+  /** 调用模型并处理工具调用,直到模型给出最终文字。每条新消息会同时追加到 messages 和 turn */
+  private async runLoop(messages: ChatMessage[], turn: ChatMessage[], historyEnd: number, ctx: ToolContext): Promise<string> {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const msg = await this.callModel(messages, historyEnd);
+      turn.push(msg);
+      messages.push(msg);
+      if (!msg.tool_calls?.length) return textOf(msg);
+      for (const call of msg.tool_calls) {
+        const out = await this.d.tools.run(call.function.name, call.function.arguments, ctx);
+        const toolMsg: ChatMessage = { role: "tool", tool_call_id: call.id, content: out };
+        turn.push(toolMsg);
+        messages.push(toolMsg);
+      }
+    }
+    return "";
+  }
+
+  /** 主动向某个会话发消息(工具和自主行动用),返回实际发出的条数 */
+  async say(space: string, raw: string): Promise<number> {
+    const out = parseOutput(raw);
+    if (!out.length) return 0;
+    const sent = await this.sendAll(space, out);
+    if (sent) this.state(space).lastSpoke = this.nowSec();
+    return sent;
+  }
+
+  private wandering = false;
+
+  /**
+   * 自由时间:没有人在说话,让 Agent 自己决定做点什么。
+   * event 不为空时表示由某个事件唤醒(例如自己提交的 OpenCode 任务完成)。返回模型最后说的话(通常是它做了什么的小结)。
+   */
+  async wander(event?: string): Promise<string> {
+    if (this.wandering) return "";
+    this.wandering = true;
+    try {
+      const cfg = this.d.cfg();
+      const db = this.d.db;
+      const now = new Date(this.d.now?.() ?? Date.now());
+      const system = buildSystemPrompt({
+        persona: cfg.persona,
+        space: "self",
+        spaceTitle: "自由时间",
+        isGroup: false,
+        summary: "",
+        owners: cfg.admins,
+        scene: "当前场景:自由时间。现在没有人在跟你说话,你可以按自己的性格和心情决定做什么,也可以什么都不做。",
+        memories: db.memoriesFor(["global"]).slice(-40),
+        otherSummaries: db.otherSpaceSummaries("self"),
+        extraSections: [...(this.d.extraSections?.() ?? []), ...(this.d.media?.promptSection ? [this.d.media.promptSection()] : []), AUTONOMY_SECTION],
+        now,
+      });
+      const chats = db.listSpaces().map((sp) => {
+        const row = db.getSpace(sp);
+        const last = db.recent(sp, 1)[0];
+        return `- ${sp}「${row.title || sp}」${last ? `,最后一条 ${formatTime(last.ts)} ${last.role === "self" ? "你" : last.senderName}: ${last.text.slice(0, 30)}` : ""}`;
+      });
+      const body = event
+        ? `刚刚发生了一件事:\n${event}\n\n你可以据此做点什么(比如通知相关的人、继续后续工作),也可以只是记下来。`
+        : [
+            `现在是 ${now.toLocaleString("zh-CN", { hour12: false })}。这是你的自由时间。`,
+            "你的聊天:",
+            ...(chats.length ? chats : ["- (还没有任何聊天)"]),
+            "可以做的事(不是任务清单,看心情,也可以什么都不做,那就只输出 <silent/>):发一条动态、改签名/状态/头像、主动找某个人或某个群说句话、整理图库、跟进之前记下的事、看看 OpenCode 任务进展。",
+            "先用 recall 看看自己最近做过什么,别重复。",
+          ].join("\n");
+      const history = flattenHistory(db.turns<ChatMessage>("self").slice(-10), this.rejectHistoryReasoning ? 0 : cfg.llm.reasoningRounds);
+      const user: ChatMessage = { role: "user", content: body };
+      const turn: ChatMessage[] = [];
+      const messages: ChatMessage[] = [{ role: "system", content: system }, ...history, user];
+      const text = await this.runLoop(messages, turn, history.length + 1, { space: "self", triggerSenderIds: [] });
+      db.addTurn("self", 0, 0, [user, ...turn]);
+      db.trimTurns("self", 30);
+      return text.replace(/<\/?silent\s*\/?>/g, "").trim();
+    } finally {
+      this.wandering = false;
     }
   }
 
@@ -288,7 +359,8 @@ export class Agent {
     }
   }
 
-  private async sendAll(space: string, out: OutMessage[]) {
+  private async sendAll(space: string, out: OutMessage[]): Promise<number> {
+    let sent = 0;
     const cfg = this.d.cfg();
     const sleep = this.d.sleep ?? ((ms: number) => Bun.sleep(ms));
     for (const msg of out) {
@@ -316,6 +388,7 @@ export class Agent {
       if (!segs.some((s) => s.type !== "reply")) continue;
       try {
         const id = await this.d.napcat.send(space as SpaceId, segs);
+        sent++;
         this.d.db.addMessage({
           space,
           msgId: id,
@@ -329,6 +402,7 @@ export class Agent {
         this.log(`send failed in ${space}: ${e}`);
       }
     }
+    return sent;
   }
 }
 

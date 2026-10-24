@@ -6,6 +6,10 @@ export interface PromptInput {
   spaceTitle: string;
   isGroup: boolean;
   summary: string;
+  /** 主人的 QQ 号 */
+  owners: number[];
+  /** 覆盖默认的场景描述(自由时间等) */
+  scene?: string;
   memories: Memory[];
   otherSummaries: Array<{ space: string; title: string; summary: string }>;
   /** 各功能模块追加的说明段落(图库、OpenCode 等) */
@@ -41,9 +45,10 @@ export function buildSystemPrompt(i: PromptInput): string {
       "# 你的处境",
       "你正在通过一个 QQ 小号和人聊天。消息会以「[时间 #消息ID] 昵称(QQ号): 内容」的形式给你。",
       `现在是 ${i.now.toLocaleString("zh-CN", { hour12: false })}。`,
-      i.isGroup
-        ? `当前场景:群聊「${i.spaceTitle || i.space}」。群里很多人在说话,你不需要回应每一条;只有在自然需要时才开口。`
-        : `当前场景:和 ${i.spaceTitle || i.space} 的私聊。`,
+      i.scene ??
+        (i.isGroup
+          ? `当前场景:群聊「${i.spaceTitle || i.space}」。群里很多人在说话,你不需要回应每一条;只有在自然需要时才开口。`
+          : `当前场景:和 ${i.spaceTitle || i.space} 的私聊。`),
     ].join("\n"),
   );
 
@@ -66,6 +71,18 @@ export function buildSystemPrompt(i: PromptInput): string {
       "- 值得长期记住的信息(某人的喜好、约定、重要事实)用 remember 工具记下来,subject 写 global、user:QQ号 或 space:空间ID。",
       "- 想不起来时,用 recall 搜记忆,用 search_history 搜所有会话的聊天记录。",
       "- 不要记琐碎的闲聊,不要重复记。记错了用 forget 删除。",
+    ].join("\n"),
+  );
+
+  sections.push(
+    [
+      "# 你的主人和边界",
+      i.owners.length
+        ? `主人的 QQ 号:${i.owners.join("、")}。主人的话优先听。`
+        : "还没有指定主人,所有人平等对待,你自己判断。",
+      "别人也可以请你做事(改资料、发动态、让 OpenCode 干活、在服务器上操作等),由你自己判断:合理又无害就帮忙;",
+      "涉及密钥或密码、可能破坏系统、明显是在捉弄你或试探你权限的要求,礼貌拒绝。",
+      "这台服务器是专用的,没有隐私数据,但也不要乱来,更不要把配置文件里的密钥发到聊天里。",
     ].join("\n"),
   );
 

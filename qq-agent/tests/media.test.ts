@@ -164,7 +164,7 @@ describe.skipIf(!FF)("MediaPipeline", () => {
     t.sources.set("u", png);
     await t.pipeline.ingest({ text: "[图片]", media: [{ kind: "image", url: "u" }] }, "p:1");
     const reg = new ToolRegistry(mediaTools(t.store));
-    const ctx = { space: "p:1", triggerSenderIds: [], isAdmin: false };
+    const ctx = { space: "p:1", triggerSenderIds: [] };
     expect(await reg.run("media_search", '{"query":"红"}', ctx)).toContain("#1");
     expect(await reg.run("media_set_kind", '{"id":1,"kind":"sticker"}', ctx)).toContain("sticker");
     expect(t.store.get(1)!.file.startsWith("sticker/")).toBe(true);

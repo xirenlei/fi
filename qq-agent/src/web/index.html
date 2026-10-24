@@ -99,7 +99,13 @@ const SETTINGS = [
     ['behavior.maxTypingMs', '单条最长等待(毫秒)', 'number'],
   ]],
   ['记忆', [['memory.windowSize', '每个会话保留的原始消息数', 'number', { hint: '更早的消息会整理成摘要' }]]],
-  ['权限', [['admins', '管理员 QQ 号', 'list', { hint: '用逗号分隔。只有管理员能让 Agent 调用 OpenCode、执行命令' }]]],
+  ['主人', [['admins', '主人的 QQ 号', 'list', { hint: '用逗号分隔。会写进提示词,主人的话优先听;不做硬性限制,别人的请求由它自己判断' }]]],
+  ['自主行动', [
+    ['proactive.enabled', '允许自己行动', 'bool', { hint: '没人说话时,隔一段时间让它自己决定:发动态、改签名、主动找人聊天,或什么都不做' }],
+    ['proactive.intervalMinutes', '平均间隔(分钟)', 'number', { hint: '实际会在 ±30% 内随机浮动,每次唤醒是一次模型请求' }],
+    ['proactive.quietStartHour', '安静时段开始(时)', 'number', { hint: '0-23,服务器本地时间' }],
+    ['proactive.quietEndHour', '安静时段结束(时)', 'number', { hint: '起点等于终点表示不设安静时段' }],
+  ]],
   ['NapCat', [
     ['napcat.wsUrl', 'WebSocket 地址', 'text'],
     ['napcat.token', 'Token', 'password'],
@@ -137,6 +143,9 @@ const tabs = {
         el('a', { href: s.napcat.webuiUrl, target: '_blank', rel: 'noopener' }, el('button', { class: 'b' }, '打开 NapCat 管理界面(扫码登录 QQ)')),
         el('span', { class: 'muted' }, 'QQ 小号需要在 NapCat 里扫码登录一次')),
       svc('napcat', 'NapCat'), svc('opencode', 'OpenCode'), svc('agent', 'Agent')));
+    root.append(el('div', { class: 'card' }, el('h2', {}, '自主行动'), el('div', { class: 'row' },
+      el('button', { class: 'b s', onclick: guard(async (ev) => { toast('它正在想…'); const r = await api('/api/proactive/run', 'POST'); toast(r.text ? '它说:' + r.text.slice(0, 80) : '它这次什么都没做'); }) }, '立即让它自由行动一次'),
+      el('span', { class: 'muted' }, '用来测试;平时按设置里的间隔自动进行'))));
     root.append(el('div', { class: 'card muted' }, '配置文件:' + s.configPath, el('br'), '数据目录:' + s.dataDir));
   },
 
