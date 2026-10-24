@@ -11,6 +11,7 @@ import { NapcatClient } from "./napcat/client";
 import { OpenCodeManager } from "./opencode/manager";
 import { TaskStore } from "./opencode/tasks";
 import { openCodePromptSection, openCodeTools } from "./opencode/tools";
+import { accountPromptSection, accountTools } from "./tools/account";
 import { systemTools } from "./tools/system";
 
 export interface App {
@@ -41,6 +42,7 @@ export function createApp(cfg: Config = loadConfig()): App {
     ...mediaTools(store),
     ...openCodeTools(oc),
     ...systemTools(() => oc.workdir()),
+    ...accountTools({ call: (action, params) => napcat.call(action, params), store }),
   ]);
   const agent = new Agent({
     cfg: () => cfg,
@@ -49,7 +51,7 @@ export function createApp(cfg: Config = loadConfig()): App {
     llm,
     tools,
     media,
-    extraSections: () => [openCodePromptSection(cfg.opencode.workdir)],
+    extraSections: () => [openCodePromptSection(cfg.opencode.workdir), accountPromptSection()],
     log,
   });
 
