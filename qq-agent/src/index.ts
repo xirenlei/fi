@@ -1,31 +1,19 @@
 import { join } from "node:path";
 import { dataDir, loadConfig } from "./config";
+import { Agent } from "./agent/agent";
+import { ToolRegistry, memoryTools } from "./agent/tools";
+import { LlmClient } from "./llm/client";
 import { Db } from "./memory/db";
-import { NapcatClient, isMessageEvent } from "./napcat/client";
-import { displayName, parseMessage } from "./napcat/parse";
-import { spaceOf } from "./napcat/types";
+import { NapcatClient } from "./napcat/client";
 
 const cfg = loadConfig();
 const db = new Db(join(dataDir(), "agent.db"));
 const napcat = new NapcatClient({ wsUrl: cfg.napcat.wsUrl, token: cfg.napcat.token });
+const llm = new LlmClient(() => ({ baseUrl: cfg.llm.baseUrl, apiKey: cfg.llm.apiKey, extraBody: cfg.llm.extraBody }));
+const tools = new ToolRegistry(memoryTools(db));
+const agent = new Agent({ cfg: () => cfg, db, napcat, llm, tools });
 
-napcat.onEvent((ev) => {
-  if (!isMessageEvent(ev)) return;
-  const parsed = parseMessage(ev);
-  const space = spaceOf(ev);
-  const isSelf = ev.post_type === "message_sent";
-  db.addMessage({
-    space,
-    msgId: ev.message_id,
-    ts: ev.time,
-    senderId: ev.user_id,
-    senderName: displayName(ev),
-    role: isSelf ? "self" : "user",
-    text: parsed.text,
-  });
-  console.log(`[${space}] ${displayName(ev)}: ${parsed.text}`);
-});
-
+napcat.onEvent((ev) => agent.handleEvent(ev));
 napcat.connect();
 await napcat.waitOpen(30_000);
 const me = await napcat.getLoginInfo();
