@@ -47,8 +47,17 @@ export interface Config {
   /** 允许让 Agent 调用 OpenCode / 执行命令的 QQ 号 */
   admins: number[];
   opencode: {
+    /** OpenCode 干活的目录 */
     workdir: string;
     baseUrl: string;
+    /** 服务没运行时自动启动 */
+    autoStart: boolean;
+    bin: string;
+    password: string;
+    /** 写入 OpenCode 的 DeepSeek 密钥 */
+    apiKey: string;
+    /** OpenCode 使用的模型,格式 provider/model */
+    model: string;
   };
   web: {
     port: number;
@@ -72,7 +81,15 @@ export const defaultConfig: Config = {
   memory: { windowSize: 200 },
   group: { alwaysReplyWhenMentioned: true, cooldownSeconds: 20, judgeContext: 20 },
   admins: [],
-  opencode: { workdir: "", baseUrl: "http://127.0.0.1:4096" },
+  opencode: {
+    workdir: "",
+    baseUrl: "http://127.0.0.1:4096",
+    autoStart: true,
+    bin: "opencode",
+    password: "",
+    apiKey: "",
+    model: "deepseek/deepseek-flash",
+  },
   web: { port: 8765 },
 };
 
@@ -99,9 +116,11 @@ export function mergeConfig<T>(base: T, override: unknown): T {
 }
 
 export function loadConfig(path = configPath()): Config {
-  if (!existsSync(path)) return structuredClone(defaultConfig);
-  const raw = JSON.parse(readFileSync(path, "utf8"));
-  return mergeConfig(structuredClone(defaultConfig), raw);
+  const cfg = existsSync(path)
+    ? mergeConfig(structuredClone(defaultConfig), JSON.parse(readFileSync(path, "utf8")))
+    : structuredClone(defaultConfig);
+  if (!cfg.opencode.workdir) cfg.opencode.workdir = join(dataDir(), "workspace");
+  return cfg;
 }
 
 export function saveConfig(cfg: Config, path = configPath()): void {

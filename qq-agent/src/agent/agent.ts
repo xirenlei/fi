@@ -42,6 +42,8 @@ interface SpaceState {
   running: boolean;
   dirty: boolean;
   mentioned: boolean;
+  /** 系统通知触发:必须让模型处理,不走群聊判定 */
+  forced: boolean;
   lastSpoke: number | null;
 }
 
@@ -67,7 +69,7 @@ export class Agent {
 
   private state(space: string): SpaceState {
     let s = this.states.get(space);
-    if (!s) this.states.set(space, (s = { running: false, dirty: false, mentioned: false, lastSpoke: null }));
+    if (!s) this.states.set(space, (s = { running: false, dirty: false, mentioned: false, forced: false, lastSpoke: null }));
     return s;
   }
 
@@ -111,9 +113,20 @@ export class Agent {
     if (!mentioned && parsed.replyToId != null) {
       mentioned = this.d.db.findByMsgId(space, parsed.replyToId)?.role === "self";
     }
+    this.trigger(space, mentioned, false);
+  }
+
+  /** 系统事件(例如 OpenCode 任务完成):写入一条系统消息并让模型处理,由模型决定怎么向用户汇报 */
+  notify(space: string, text: string): void {
+    this.d.db.addMessage({ space, msgId: null, ts: this.nowSec(), senderId: 0, senderName: "系统", role: "user", text });
+    this.trigger(space, true, true);
+  }
+
+  private trigger(space: string, mentioned: boolean, forced: boolean) {
     const st = this.state(space);
     st.dirty = true;
     st.mentioned ||= mentioned;
+    st.forced ||= forced;
     if (!st.running) {
       st.running = true;
       const p = this.drain(space).finally(() => this.inflight.delete(p));
@@ -143,9 +156,11 @@ export class Agent {
       while (st.dirty) {
         st.dirty = false;
         const mentioned = st.mentioned;
+        const forced = st.forced;
         st.mentioned = false;
+        st.forced = false;
         try {
-          if (await this.shouldReply(space, mentioned)) await this.respond(space);
+          if (forced || (await this.shouldReply(space, mentioned))) await this.respond(space);
         } catch (e) {
           this.log(`error in ${space}: ${e instanceof Error ? e.stack ?? e.message : e}`);
         }
