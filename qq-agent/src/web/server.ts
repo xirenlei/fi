@@ -183,7 +183,9 @@ export function startWeb(app: App, port = app.cfg.web.port) {
         setTimeout(() => process.exit(0), 300);
         return json({ ok: true, note: "agent 即将重启" });
       }
-      const r = await runShell(`systemctl --user ${action} qq-agent-${name}.service`, dataDir(), 30_000);
+      const ctl = process.env.QQ_AGENT_CTL;
+      const cmd = ctl ? `'${ctl}' ${action} ${name}` : `systemctl --user ${action} qq-agent-${name}.service`;
+      const r = await runShell(cmd, dataDir(), 30_000);
       return json({ ok: r.code === 0, output: r.output });
     }
 

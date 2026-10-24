@@ -59,6 +59,23 @@ export function createApp(cfg: Config = loadConfig()): App {
     agent.notify(task.space, `[OpenCode 任务 #${task.id} ${head}]\n任务:${task.prompt}\n结果:\n${result.slice(0, 3000)}`);
   };
 
+  /** OpenCode 服务可能比 Agent 晚起来,所以重试一段时间 */
+  let stopped = false;
+  async function setupOpenCode() {
+    for (let i = 0; i < 24 && !stopped; i++) {
+      try {
+        await oc.configure();
+        oc.startWatching();
+        await oc.reconcile();
+        return;
+      } catch (e) {
+        if (i === 0) log(`opencode not ready yet (${e}); will retry`);
+        await Bun.sleep(5000);
+      }
+    }
+    log("opencode setup gave up; restart the agent after fixing OpenCode");
+  }
+
   return {
     cfg,
     db,
@@ -70,12 +87,10 @@ export function createApp(cfg: Config = loadConfig()): App {
     async start() {
       napcat.connect();
       // OpenCode 的准备不阻塞聊天功能
-      oc.configure()
-        .then(() => oc.startWatching())
-        .then(() => oc.reconcile())
-        .catch((e) => log(`opencode setup failed: ${e}`));
+      void setupOpenCode();
     },
     async stop() {
+      stopped = true;
       napcat.close();
       await oc.stop();
       db.close();
