@@ -237,6 +237,8 @@ QQ_AGENT_HOME="$DATA_DIR" "$BIN_DIR/qq-agent" restart "${QQA_RESTART:-all}" || w
 sleep 3
 QQ_AGENT_HOME="$DATA_DIR" "$BIN_DIR/qq-agent" status || true
 
+# 更新时由 qq-agent update 负责收尾提示,不再重复首次安装的引导
+[ -z "${QQA_RESTART:-}" ] || exit 0
 WEBUI_URL="$(jq -r '.napcat.webuiUrl' "$DATA_DIR/config.json")"
 CONSOLE_PORT="$(jq -r '.web.port' "$DATA_DIR/config.json")"
 cat <<DONE
