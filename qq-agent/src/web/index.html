@@ -41,6 +41,22 @@ pre{white-space:pre-wrap;word-break:break-all;background:var(--bg);padding:10px;
 .media{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
 .media .it{border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px}
 .media img,.media video{width:100%;height:110px;object-fit:contain;background:var(--bg);border-radius:6px}
+:root{--c1:#5b8def;--c2:#8b6fe0;--c3:#e0a030;--c4:#3cb08a;--c5:#e06c75;--c6:#9aa5b8}
+@media (prefers-color-scheme:dark){:root{--c1:#7aa2ff;--c2:#a58cf0;--c3:#e8b84e;--c4:#52c9a3;--c5:#ee8790;--c6:#8793a8}}
+.bar{display:flex;height:16px;border-radius:8px;overflow:hidden;border:1px solid var(--line);margin:8px 0}
+.bar i{display:block;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:6px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+details.sec{border:1px solid var(--line);border-radius:8px;margin:10px 0;padding:0 14px;background:var(--card)}
+details.sec>summary{cursor:pointer;padding:11px 0;font-weight:600}
+details.sec .num,.num{color:var(--mute);font-weight:400;font-size:12px;margin-left:6px}
+details.sec details{border-top:1px dashed var(--line);margin:0;padding:0}
+details.sec details>summary{padding:9px 0;font-weight:500;cursor:pointer}
+.meter{height:6px;background:var(--bg);border-radius:3px;overflow:hidden;border:1px solid var(--line);margin:2px 0 8px}
+.meter i{display:block;height:100%;background:var(--acc)}
+.meter.warn i{background:var(--warn)}
+.step{display:inline-block;min-width:22px;height:22px;line-height:22px;text-align:center;border-radius:11px;background:var(--acc);color:#fff;font-size:12px;margin-right:8px}
 .toast{position:fixed;right:16px;bottom:16px;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:8px;opacity:0;transition:.25s;pointer-events:none}
 .toast.on{opacity:1}
 .tag{display:inline-block;padding:0 6px;border-radius:4px;background:var(--bg);border:1px solid var(--line);font-size:12px;color:var(--mute)}
@@ -63,7 +79,7 @@ const el = (tag, attrs = {}, ...kids) => {
     else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
     else if (v !== false && v != null) e.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(String(c)));
+  for (const c of kids.flat(Infinity)) if (c != null) e.append(c.nodeType ? c : document.createTextNode(String(c)));
   return e;
 };
 const api = async (path, method = 'GET', body) => {
@@ -232,6 +248,68 @@ const tabs = {
           }) }, '查看'))))) : el('p', { class: 'muted' }, '还没有消息。')), detail);
   },
 
+  async context(root) {
+    const c = await api('/api/context');
+    const t = c.tokens;
+    const n = (x) => x.toLocaleString('zh-CN');
+    const parts = [
+      ['工具定义', t.tools, 'var(--c6)'],
+      ['系统提示词', t.system, 'var(--c1)'],
+      ['长期记忆', t.memories, 'var(--c2)'],
+      ['各会话摘要', t.summaries, 'var(--c3)'],
+      ['近期聊天', t.blocks, 'var(--c4)'],
+      ['其他会话新消息', t.others, 'var(--c5)'],
+    ];
+    const sum = parts.reduce((a, p) => a + p[1], 0) || 1;
+
+    root.append(el('div', { class: 'card' }, el('h2', {}, '它现在"看到"的上下文'),
+      el('p', { style: 'margin:0 0 8px' }, '下面是此刻发给模型的内容,', el('b', {}, '按实际顺序从上到下排'), '。越靠上越稳定:连续处理同一个会话时,上一次和这一次相同的前面部分会命中缓存,每次请求都变的只有最后几块。'),
+      el('div', { class: 'muted' }, `${c.busy ? '正在处理一件事' : '空闲'}${c.queued ? `,排队 ${c.queued} 件` : ''}。token 是按字数估的,实际以 DeepSeek 的计数为准。`)));
+
+    root.append(el('div', { class: 'card' }, el('h2', {}, `组成与大小(约 ${n(t.total)} token)`),
+      el('div', { class: 'bar' }, parts.map(([name, v, color]) => el('i', { title: `${name} ${n(v)}`, style: `width:${(v / sum) * 100}%;background:${color}` }))),
+      el('div', { class: 'legend' }, parts.map(([name, v, color]) => el('span', {}, el('span', { class: 'sw', style: `background:${color}` }), `${name} `, el('b', {}, n(v)))))));
+
+    const sec = (no, title, meta, ...body) => el('details', { class: 'sec', open: no <= 3 && no !== 1 },
+      el('summary', {}, el('span', { class: 'step' }, no), title, el('span', { class: 'num' }, meta)), body);
+    const meter = (v, max, warn) => el('div', { class: 'meter' + (warn ? ' warn' : '') }, el('i', { style: `width:${Math.min(100, (v / max) * 100)}%` }));
+
+    root.append(sec(1, '固定部分:工具定义 + 系统提示词', `工具约 ${n(t.tools)} · 提示词约 ${n(t.system)} token,每次都一样`,
+      el('p', { class: 'muted', style: 'margin:0 0 6px' }, '人设、输出格式、记忆规则、管理员和边界、各功能说明。里面没有时间、当前会话这些会变的东西,所以每次请求开头都相同。'),
+      el('pre', {}, c.system)));
+
+    const mem = c.memories;
+    root.append(sec(2, '长期记忆', `${mem.items.length} 条 · ${n(mem.chars)} / ${n(mem.limit)} 字 · 约 ${n(t.memories)} token`,
+      meter(mem.chars, mem.limit, mem.chars > mem.limit * 0.8),
+      el('p', { class: 'muted', style: 'margin:0 0 6px' }, '所有人、所有会话的记忆全部放进上下文。超过字数上限后,会让模型自动合并整理(旧的会归档备份)。'),
+      mem.items.length ? el('table', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, '关于'), el('th', {}, '内容')),
+        mem.items.map((m) => el('tr', {}, el('td', {}, m.id), el('td', {}, el('span', { class: 'tag' }, m.subject)), el('td', {}, m.content)))) : el('p', { class: 'muted' }, '还没有长期记忆。')));
+
+    root.append(sec(3, '各会话更早的内容摘要', c.summaries.length ? `${c.summaries.length} 个会话 · 约 ${n(t.summaries)} token` : '暂无',
+      el('p', { class: 'muted', style: 'margin:0 0 6px' }, '一个会话的近期消息涨满上限后,最老的一批会被整理成摘要放在这里。'),
+      c.summaries.length ? c.summaries.map((s) => el('div', { style: 'margin:8px 0' }, el('b', {}, s.title || s.space), el('span', { class: 'num' }, s.space), el('pre', { style: 'margin-top:4px' }, s.summary)))
+        : el('p', { class: 'muted' }, '还没有会话涨到需要整理的程度。')));
+
+    root.append(sec(4, '各会话最近的聊天', `${c.blocks.length} 个会话 · 约 ${n(t.blocks)} token`,
+      el('p', { class: 'muted', style: 'margin:0 0 6px' }, '最久没动静的在上,最近活跃的在下;处理某个会话时,它会被放到最后。每个会话块只在末尾追加,涨到上限才一次性整理掉最老的一批。'),
+      c.blocks.length ? c.blocks.map((b) => el('details', {},
+        el('summary', {}, b.title || b.space, el('span', { class: 'num' }, `${b.space} · ${b.count} / ${b.max} 条 · 约 ${n(b.tokens)} token`)),
+        meter(b.count, b.max, b.count > b.max * 0.9),
+        el('p', { class: 'muted', style: 'margin:0 0 6px' }, `涨到 ${b.max} 条时整理最老的 ${b.compactEvery} 条;整理后保持在 ${b.max - b.compactEvery} 到 ${b.max} 条之间。`),
+        el('pre', { style: 'max-height:320px;margin-bottom:10px' }, b.lines.join('\n')))) : el('p', { class: 'muted' }, '还没有会话进入上下文。')));
+
+    root.append(sec(5, '其他会话里还没处理的新消息', c.others.length ? `${c.others.length} 个会话 · 约 ${n(t.others)} token` : '暂无',
+      el('p', { class: 'muted', style: 'margin:0 0 6px' }, '在处理别的会话时,这些会话来的新消息先放这里(不改它们自己的块,免得缓存失效)。轮到它们处理,或攒到一定数量时才并回各自的块。'),
+      c.others.length ? c.others.map((o) => el('details', {},
+        el('summary', {}, o.title || o.space, el('span', { class: 'num' }, `${o.space} · 未处理 ${o.unseen} 条(满 ${o.mergeAt} 条并入自己的块)`)),
+        meter(o.unseen, o.mergeAt, false),
+        el('pre', { style: 'max-height:240px;margin-bottom:10px' }, o.lines.join('\n')))) : el('p', { class: 'muted' }, '没有积压的新消息。')));
+
+    root.append(el('details', { class: 'sec' }, el('summary', {}, el('span', { class: 'step' }, 6), '完整原文预览', el('span', { class: 'num' }, '以"自由时间"的身份拼出来的整块上下文,即模型实际读到的文字')),
+      el('pre', { style: 'max-height:520px;margin-bottom:12px' }, c.preview)));
+    root.append(el('div', { class: 'row', style: 'margin:4px 0 20px' }, el('button', { class: 'b s', onclick: () => show('context') }, '刷新')));
+  },
+
   async memories(root) {
     const rows = await api('/api/memories');
     const subj = el('input', { placeholder: 'global / user:QQ号 / space:g:群号' });
@@ -281,7 +359,7 @@ const tabs = {
   },
 };
 
-const NAMES = { overview: '概览', settings: '设置', spaces: '会话', memories: '记忆', media: '图库', opencode: 'OpenCode', logs: '日志' };
+const NAMES = { overview: '概览', settings: '设置', spaces: '会话', context: '上下文', memories: '记忆', media: '图库', opencode: 'OpenCode', logs: '日志' };
 let current = location.hash.slice(1) || 'overview';
 async function show(name) {
   current = tabs[name] ? name : 'overview';

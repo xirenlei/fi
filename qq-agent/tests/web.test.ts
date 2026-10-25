@@ -143,3 +143,31 @@ describe("版本更新", () => {
     expect(behind.commits?.join("\n")).toContain("新增一个功能");
   });
 });
+
+describe("上下文页", () => {
+  test("返回上下文的组成:记忆、摘要、各会话块、其他会话的新消息;只读不改数据", async () => {
+    app.db.addMemory("global", "她喜欢喝茶");
+    // 会话 p:7:一些已并入、一些没处理
+    for (let i = 1; i <= 5; i++) app.db.addMessage({ space: "p:7", msgId: i, ts: 1792000000 + i, senderId: 7, senderName: "小七", role: "user", text: `私聊${i}` });
+    app.db.markIncluded(app.db.unseen("p:7").map((m) => m.id));
+    app.db.getSpace("p:7");
+    app.db.setTitle("p:7", "小七");
+    // 群 g:5 积压了 60 条没处理的消息(够并入的数量,但只读接口不能真的并入)
+    for (let i = 1; i <= 60; i++) app.db.addMessage({ space: "g:5", msgId: 100 + i, ts: 1792000100 + i, senderId: 9, senderName: "小九", role: "user", text: `群${i}` });
+    app.db.setSummaryInc("p:7", "以前聊过猫", 0);
+
+    const c = await (await fetch(base + "/api/context")).json();
+    expect(c.memories.items.map((m: any) => m.content)).toEqual(["她喜欢喝茶"]);
+    expect(c.blocks).toHaveLength(1);
+    expect(c.blocks[0]).toMatchObject({ space: "p:7", count: 5, max: 200, compactEvery: 100 });
+    expect(c.blocks[0].lines.join("\n")).toContain("私聊3");
+    expect(c.summaries[0].summary).toBe("以前聊过猫");
+    expect(c.others[0]).toMatchObject({ space: "g:5", unseen: 60 });
+    expect(c.system).toContain("自主行动");
+    expect(c.tokens.total).toBeGreaterThan(c.tokens.tools);
+    expect(c.preview).toContain("## 长期记忆");
+    // 只读:群里的消息没有被并入
+    expect(app.db.unseenCount("g:5")).toBe(60);
+    expect(app.db.includedCount("g:5")).toBe(0);
+  });
+});

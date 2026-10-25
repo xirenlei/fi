@@ -6,7 +6,7 @@ import { compactSpace } from "../memory/summarize";
 import { isMessageEvent } from "../napcat/client";
 import { displayName, parseMessage, seg, type ParsedMessage } from "../napcat/parse";
 import { parseSpace, spaceOf, type OneBotEvent, type Segment, type SpaceId } from "../napcat/types";
-import { renderContext, type SpaceBlock } from "./context";
+import { estimateTokens, formatLines, renderContext, type ContextInput, type SpaceBlock } from "./context";
 import { interpretEvent, requestGuidance } from "./events";
 import { judgeReply } from "./judge";
 import { parseOutput, plainLength, type OutMessage, type OutPart } from "./output";
@@ -58,6 +58,19 @@ const FREE_TIME_TEXT = [
   "可以做的事(不是任务清单,看心情,也可以什么都不做,那就只输出 <silent/>):发一条动态、改签名/状态/头像、主动找某个人或某个群说句话、整理图库、跟进之前记下的事、看看 OpenCode 任务进展。",
   "先用 recall 看看自己最近做过什么,别重复。",
 ].join("\n");
+
+export interface ContextSnapshot {
+  tokens: { tools: number; system: number; memories: number; summaries: number; blocks: number; others: number; total: number };
+  system: string;
+  toolsChars: number;
+  memories: { items: Array<{ id: number; subject: string; content: string; ts: number }>; chars: number; limit: number };
+  summaries: Array<{ space: string; title: string; summary: string }>;
+  blocks: Array<{ space: string; title: string; count: number; max: number; compactEvery: number; lines: string[]; tokens: number }>;
+  others: Array<{ space: string; title: string; shown: number; unseen: number; mergeAt: number; lines: string[] }>;
+  busy: boolean;
+  queued: number;
+  preview: string;
+}
 
 export class Agent {
   /** 全局排队:一次只处理一件事,处理完才轮到下一件,先来后到,没有任何特权 */
@@ -247,13 +260,23 @@ export class Agent {
 
   /** 拼出「所有会话」的上下文文本。active 是正在处理的会话,没有则是自由时间 */
   buildContext(opts: { active?: { space: string; pending: StoredMessage[]; hidden: number }; free?: string }): string {
+    return renderContext(this.gatherContext(opts, true));
+  }
+
+  /**
+   * 收集拼上下文需要的全部数据。commit 为真时会把其他会话积压够多的新消息并进它们自己的块(真正的请求用);
+   * 为假时只读,不改任何东西(控制台查看用)。
+   */
+  private gatherContext(opts: { active?: { space: string; pending: StoredMessage[]; hidden: number }; free?: string }, commit: boolean): ContextInput {
     const db = this.d.db;
     const cfg = this.d.cfg();
     const activeSpace = opts.active?.space;
 
     // 其他会话积压太多的新消息,并进它们自己的块(这会让缓存失效一次,所以要攒到一定数量)
-    for (const sp of db.listSpaces()) {
-      if (sp !== activeSpace && db.unseenCount(sp) >= MERGE_UNSEEN_AT) db.markIncluded(db.unseen(sp).map((m) => m.id));
+    if (commit) {
+      for (const sp of db.listSpaces()) {
+        if (sp !== activeSpace && db.unseenCount(sp) >= MERGE_UNSEEN_AT) db.markIncluded(db.unseen(sp).map((m) => m.id));
+      }
     }
 
     const rows = db.contextSpaces();
@@ -272,7 +295,7 @@ export class Agent {
       if (messages.length) others.push({ space: sp, title: db.getSpace(sp).title, messages });
     }
 
-    return renderContext({
+    return {
       now: new Date(this.d.now?.() ?? Date.now()),
       selfId: this.d.napcat.selfId,
       memories: db.allMemories(),
@@ -282,7 +305,57 @@ export class Agent {
       active: opts.active ? { ...opts.active, title: db.getSpace(opts.active.space).title } : undefined,
       free: opts.free,
       maxChars: MAX_CONTEXT_CHARS,
-    });
+    };
+  }
+
+  /** 控制台「上下文」页用:此刻发给模型的上下文由哪些部分组成,每部分多大。只读,不会改任何数据 */
+  snapshot(): ContextSnapshot {
+    const cfg = this.d.cfg();
+    const db = this.d.db;
+    const input = this.gatherContext({ free: FREE_TIME_TEXT }, false);
+    const preview = renderContext(input);
+    const system = this.systemPrompt();
+    const toolsText = JSON.stringify(this.d.tools.defs);
+    const memText = input.memories.map((m) => `- #${m.id} [${m.subject}] ${m.content}`).join("\n");
+    const sumText = input.summaries.map((s) => s.summary).join("\n");
+    const blockLines = input.blocks.map((b) => formatLines(b.messages, { selfId: input.selfId }));
+    const othersLines = input.others.map((o) => formatLines(o.messages, { selfId: input.selfId }));
+    const tok = (t: string) => estimateTokens(t);
+    return {
+      tokens: {
+        tools: tok(toolsText),
+        system: tok(system),
+        memories: tok(memText),
+        summaries: tok(sumText),
+        blocks: tok(blockLines.flat().join("\n")),
+        others: tok(othersLines.flat().join("\n")),
+        total: tok(toolsText) + tok(preview) + tok(system),
+      },
+      system,
+      toolsChars: toolsText.length,
+      memories: { items: input.memories, chars: db.memoryChars(), limit: cfg.memory.maxMemoryChars },
+      summaries: input.summaries.filter((s) => s.summary.trim()),
+      blocks: input.blocks.map((b, i) => ({
+        space: b.space,
+        title: b.title,
+        count: b.messages.length,
+        max: cfg.memory.maxMessages,
+        compactEvery: cfg.memory.compactMessages,
+        lines: blockLines[i]!,
+        tokens: tok(blockLines[i]!.join("\n")),
+      })),
+      others: input.others.map((o, i) => ({
+        space: o.space,
+        title: o.title,
+        shown: o.messages.length,
+        unseen: db.unseenCount(o.space),
+        mergeAt: MERGE_UNSEEN_AT,
+        lines: othersLines[i]!,
+      })),
+      busy: this.busy,
+      queued: this.queue.length,
+      preview,
+    };
   }
 
   private async respond(space: string) {

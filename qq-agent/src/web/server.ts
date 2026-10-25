@@ -159,6 +159,8 @@ export function startWeb(app: App, port = app.cfg.web.port) {
       }
     }
 
+    if (p === "/api/context" && m === "GET") return json(app.agent.snapshot());
+
     if (p === "/api/spaces" && m === "GET") {
       return json(
         app.db.listSpaces().map((s) => {

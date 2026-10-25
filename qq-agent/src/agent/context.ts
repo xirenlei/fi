@@ -73,6 +73,12 @@ export function formatLines(messages: StoredMessage[], opts: LineOptions = {}): 
   return lines;
 }
 
+/** 粗略估算 token 数(没有 DeepSeek 的分词器,按字符类型估一个够用的数) */
+export function estimateTokens(text: string): number {
+  const cjk = (text.match(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/g) ?? []).length;
+  return Math.round(cjk * 0.75 + (text.length - cjk) * 0.3);
+}
+
 export interface SpaceBlock {
   space: string;
   title: string;
