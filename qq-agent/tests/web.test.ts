@@ -14,7 +14,7 @@ let base: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "qqa-web-"));
   process.env.QQ_AGENT_HOME = home;
-  const cfg = mergeConfig(defaultConfig, { opencode: { workdir: join(home, "ws"), baseUrl: "http://127.0.0.1:1", autoStart: false }, llm: { apiKey: "sk-secret" } });
+  const cfg = mergeConfig(defaultConfig, { opencode: { workdir: join(home, "ws") }, llm: { apiKey: "sk-secret" } });
   app = createApp(cfg);
   server = startWeb(app, 0);
   base = `http://127.0.0.1:${server.port}`;
@@ -52,7 +52,7 @@ describe("web api", () => {
     expect(html).toContain("QQ Agent 控制台");
     const st = await (await fetch(base + "/api/status")).json();
     expect(st.napcat.connected).toBe(false);
-    expect(st.opencode.healthy).toBe(false);
+    expect(st.jobs.running).toBe(0);
   });
 
   test("保存配置:立即生效,落盘,密钥不回显", async () => {
@@ -99,7 +99,7 @@ describe("web api", () => {
     expect((await (await fetch(`${base}/api/media/${item.id}`, { method: "PATCH", headers: H, body: JSON.stringify({ kind: "image" }) })).json()).kind).toBe("image");
     expect((await (await fetch(`${base}/api/media/${item.id}`, { method: "DELETE", headers: H })).json()).ok).toBe(true);
 
-    expect(await (await fetch(base + "/api/tasks")).json()).toEqual([]);
+    expect(await (await fetch(base + "/api/jobs")).json()).toEqual([]);
     expect((await fetch(base + "/api/logs/bogus")).status).toBe(404);
   });
 });

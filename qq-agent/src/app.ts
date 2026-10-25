@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Agent } from "./agent/agent";
 import { Scheduler } from "./agent/scheduler";
@@ -9,9 +10,8 @@ import { MediaStore } from "./media/store";
 import { mediaTools } from "./media/tools";
 import { Db } from "./memory/db";
 import { NapcatClient } from "./napcat/client";
-import { OpenCodeManager } from "./opencode/manager";
-import { TaskStore } from "./opencode/tasks";
-import { openCodePromptSection, openCodeTools } from "./opencode/tools";
+import { JobManager, JobStore, type Job } from "./jobs/jobs";
+import { jobTools, openCodePromptSection } from "./jobs/tools";
 import { accountPromptSection, accountTools } from "./tools/account";
 import { chatTools } from "./tools/chat";
 import { qqApiPromptSection, qqApiTools } from "./tools/qqapi";
@@ -23,11 +23,25 @@ export interface App {
   db: Db;
   napcat: NapcatClient;
   agent: Agent;
-  oc: OpenCodeManager;
+  jobs: JobManager;
   store: MediaStore;
   startedAt: number;
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+
+/** 每条 shell 命令都带上的环境变量:OpenCode 用的 DeepSeek 密钥,并关掉它的自动升级和彩色输出 */
+export function shellEnv(cfg: Config): Record<string, string> {
+  const env: Record<string, string> = { OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1" };
+  const key = cfg.opencode.apiKey || cfg.llm.apiKey;
+  if (key) env.DEEPSEEK_API_KEY = key;
+  return env;
+}
+
+/** 后台任务结束后写给 Agent 的系统消息 */
+export function jobReport(job: Job): string {
+  const head = job.status === "done" ? "已完成" : job.status === "aborted" ? "已中止" : `失败${job.exitCode != null ? `,退出码 ${job.exitCode}` : ""}`;
+  return `[后台任务 #${job.id} ${head}]\n命令:${job.command.slice(0, 300)}\n输出末尾:\n${job.result.slice(-3000) || "(没有输出)"}`;
 }
 
 const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
@@ -35,17 +49,27 @@ const log = (m: string) => console.log(`${new Date().toISOString()} ${m}`);
 /** 把各个模块组装起来。配置对象是活的:控制台保存设置后,大部分选项立即生效 */
 export function createApp(cfg: Config = loadConfig()): App {
   const db = new Db(join(dataDir(), "agent.db"));
+  const workdir = () => {
+    mkdirSync(cfg.opencode.workdir, { recursive: true });
+    return cfg.opencode.workdir;
+  };
   const napcat = new NapcatClient({ wsUrl: cfg.napcat.wsUrl, token: cfg.napcat.token, log });
   const llm = new LlmClient(() => ({ baseUrl: cfg.llm.baseUrl, apiKey: cfg.llm.apiKey, extraBody: cfg.llm.extraBody }));
   const store = new MediaStore(db, join(dataDir(), "media"));
   const media = new MediaPipeline({ store, llm, cfg: () => cfg, log });
-  const oc = new OpenCodeManager(() => cfg, new TaskStore(db), log);
+  const jobs = new JobManager({
+    store: new JobStore(db),
+    dir: join(dataDir(), "jobs"),
+    cwd: () => workdir(),
+    env: () => shellEnv(cfg),
+    log,
+  });
 
   const tools = new ToolRegistry([
     ...memoryTools(db),
     ...mediaTools(store),
-    ...openCodeTools(oc),
-    ...systemTools(() => oc.workdir()),
+    ...jobTools(jobs),
+    ...systemTools(() => workdir(), { jobs, env: () => shellEnv(cfg) }),
     ...accountTools({ call: (action, params) => napcat.call(action, params), store }),
     ...chatTools({ db, say: (space, raw) => agent.say(space, raw) }),
     ...qqApiTools({ call: (action, params) => napcat.call(action, params) }),
@@ -57,17 +81,16 @@ export function createApp(cfg: Config = loadConfig()): App {
     llm,
     tools,
     media,
-    extraSections: () => [openCodePromptSection(cfg.opencode.workdir), accountPromptSection(), qqApiPromptSection(loadCatalog().length)],
+    extraSections: () => [openCodePromptSection({ workdir: workdir(), bin: cfg.opencode.bin, model: cfg.opencode.model }), accountPromptSection(), qqApiPromptSection(loadCatalog().length)],
     log,
   });
 
   napcat.onEvent((ev) => agent.handleEvent(ev));
-  oc.onDone = ({ task, status, result }) => {
-    const head = status === "done" ? "已完成" : "失败";
-    const text = `[OpenCode 任务 #${task.id} ${head}]\n任务:${task.prompt}\n结果:\n${result.slice(0, 3000)}`;
-    // 自己在自由时间提交的任务,没有对应的聊天可汇报,唤醒它自己处理
-    if (task.space === "self") void agent.wander(text).catch((e) => log(`wander failed: ${e}`));
-    else agent.notify(task.space, text);
+  jobs.onDone = (job) => {
+    const text = jobReport(job);
+    // 自己在自由时间启动的任务,没有对应的聊天可汇报,唤醒它自己处理
+    if (job.space === "self") void agent.wander(text).catch((e) => log(`wander failed: ${e}`));
+    else agent.notify(job.space, text);
   };
 
   const scheduler = new Scheduler({
@@ -81,42 +104,24 @@ export function createApp(cfg: Config = loadConfig()): App {
     log,
   });
 
-  /** OpenCode 服务可能比 Agent 晚起来,所以重试一段时间 */
-  let stopped = false;
-  async function setupOpenCode() {
-    for (let i = 0; i < 24 && !stopped; i++) {
-      try {
-        await oc.configure();
-        oc.startWatching();
-        await oc.reconcile();
-        return;
-      } catch (e) {
-        if (i === 0) log(`opencode not ready yet (${e}); will retry`);
-        await Bun.sleep(5000);
-      }
-    }
-    log("opencode setup gave up; restart the agent after fixing OpenCode");
-  }
-
   return {
     cfg,
     db,
     napcat,
     agent,
-    oc,
+    jobs,
     store,
     startedAt: Date.now(),
     async start() {
       napcat.connect();
       scheduler.start();
-      // OpenCode 的准备不阻塞聊天功能
-      void setupOpenCode();
+      // 接着盯上次没跑完的后台任务(Agent 重启、更新期间结束的也会在这里补上汇报)
+      jobs.startWatching();
     },
     async stop() {
-      stopped = true;
       scheduler.stop();
       napcat.close();
-      await oc.stop();
+      jobs.stop();
       db.close();
     },
   };

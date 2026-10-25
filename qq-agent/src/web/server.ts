@@ -9,11 +9,10 @@ const SECRET_PATHS = [
   ["llm", "apiKey"],
   ["napcat", "token"],
   ["opencode", "apiKey"],
-  ["opencode", "password"],
 ] as const;
 const MASK = "***";
-const LOG_NAMES = ["agent", "napcat", "opencode"] as const;
-const SERVICES = ["agent", "napcat", "opencode"] as const;
+const LOG_NAMES = ["agent", "napcat"] as const;
+const SERVICES = ["agent", "napcat"] as const;
 
 type Json = Record<string, any>;
 
@@ -133,7 +132,7 @@ export function startWeb(app: App, port = app.cfg.web.port) {
       return json({
         uptimeSec: Math.floor((Date.now() - app.startedAt) / 1000),
         napcat: { connected: app.napcat.connected, selfId: app.napcat.selfId ?? null, webuiUrl: app.cfg.napcat.webuiUrl },
-        opencode: { healthy: await app.oc.client.healthy(), running: app.oc.tasks.running().length },
+        jobs: { running: app.jobs.store.running().length },
         spaces: app.db.listSpaces().length,
         media: app.store.list({ limit: 100000 }).length,
         memories: app.db.allMemories().length,
@@ -150,11 +149,6 @@ export function startWeb(app: App, port = app.cfg.web.port) {
         saveConfig(app.cfg);
         const restartRequired =
           before.napcat.wsUrl !== app.cfg.napcat.wsUrl || before.napcat.token !== app.cfg.napcat.token || before.web.port !== app.cfg.web.port;
-        const ocChanged =
-          before.opencode.model !== app.cfg.opencode.model ||
-          before.opencode.apiKey !== app.cfg.opencode.apiKey ||
-          before.llm.apiKey !== app.cfg.llm.apiKey;
-        if (ocChanged) app.oc.configure().catch((e) => log(`opencode configure failed: ${e}`));
         return json({ ok: true, changed, restartRequired });
       }
     }
@@ -232,9 +226,14 @@ export function startWeb(app: App, port = app.cfg.web.port) {
       return json({ ok: true, text });
     }
 
-    if (p === "/api/tasks" && m === "GET") return json(app.oc.tasks.recent(50));
-    const tk = p.match(/^\/api\/tasks\/(\d+)\/abort$/);
-    if (tk && m === "POST") return json({ ok: await app.oc.abort(Number(tk[1])) });
+    if (p === "/api/jobs" && m === "GET") return json(app.jobs.store.recent(50));
+    const jb = p.match(/^\/api\/jobs\/(\d+)$/);
+    if (jb && m === "GET") {
+      const job = app.jobs.store.get(Number(jb[1]));
+      return job ? json({ ...job, output: await app.jobs.tail(job, 6000) }) : bad("没有这个任务", 404);
+    }
+    const ja = p.match(/^\/api\/jobs\/(\d+)\/abort$/);
+    if (ja && m === "POST") return json({ ok: await app.jobs.abort(Number(ja[1])) });
 
     const lg = p.match(/^\/api\/logs\/(\w+)$/);
     if (lg && m === "GET") {

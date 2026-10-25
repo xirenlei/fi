@@ -64,14 +64,11 @@ export interface Config {
     quietEndHour: number;
   };
   opencode: {
-    /** OpenCode 干活的目录 */
+    /** OpenCode 干活的目录,Agent 的 shell 也在这里执行 */
     workdir: string;
-    baseUrl: string;
-    /** 服务没运行时自动启动 */
-    autoStart: boolean;
+    /** OpenCode 可执行文件 */
     bin: string;
-    password: string;
-    /** 写入 OpenCode 的 DeepSeek 密钥 */
+    /** 给 OpenCode 用的 DeepSeek 密钥(以环境变量传入),留空则用上面的 llm.apiKey */
     apiKey: string;
     /** OpenCode 使用的模型,格式 provider/model */
     model: string;
@@ -101,10 +98,7 @@ export const defaultConfig: Config = {
   proactive: { enabled: true, intervalMinutes: 120, quietStartHour: 1, quietEndHour: 8 },
   opencode: {
     workdir: "",
-    baseUrl: "http://127.0.0.1:4096",
-    autoStart: true,
     bin: "opencode",
-    password: "",
     apiKey: "",
     model: "deepseek/deepseek-flash",
   },

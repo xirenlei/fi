@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qq-agent:管理 NapCat / OpenCode / Agent 三个服务的命令行工具。
+# qq-agent:管理 NapCat / Agent 两个服务的命令行工具。
 # 有用户级 systemd 时用 systemd 管理;没有时用简单的守护循环 + pid 文件。
 set -uo pipefail
 
@@ -8,14 +8,14 @@ DATA_DIR="${QQ_AGENT_HOME:-$HOME/.config/qq-agent}"
 [ -f "$DATA_DIR/install.env" ] && . "$DATA_DIR/install.env"
 LOG_DIR="$DATA_DIR/logs"
 RUN_DIR="$DATA_DIR/run"
-SERVICES=(napcat opencode agent)
+SERVICES=(napcat agent)
 
 usage() {
   cat <<USAGE
 用法: qq-agent <命令> [服务]
-  start|stop|restart [napcat|opencode|agent|all]   启停服务(默认 all)
+  start|stop|restart [napcat|agent|all]   启停服务(默认 all)
   status                                           查看各服务状态
-  logs <napcat|opencode|agent>                     查看日志(Ctrl+C 退出)
+  logs <napcat|agent>                     查看日志(Ctrl+C 退出)
   version                                          显示当前版本
   update [--check]                                 更新到最新版本(--check 只检查,不更新)
   open                                             打开控制台
@@ -38,9 +38,6 @@ run_service() {
         echo "错误:没有 xvfb-run,也没有可用的桌面显示。请安装 xvfb 和 xauth。" >&2
         exit 1
       fi ;;
-    opencode)
-      mkdir -p "$WORKDIR" && cd "$WORKDIR" || exit 1
-      exec "$OPENCODE_BIN" serve --hostname 127.0.0.1 --port 4096 ;;
     agent)
       cd "$APP_DIR/qq-agent" || exit 1
       exec "$BUN" run src/index.ts ;;

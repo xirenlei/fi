@@ -52,7 +52,7 @@ test("端到端:NapCat 推来私聊消息 → 模型回复 → 通过 NapCat 发
     napcat: { wsUrl: `ws://127.0.0.1:${napcat.port}`, token: "tok" },
     llm: { baseUrl: `http://127.0.0.1:${llm.port}`, apiKey: "k" },
     behavior: { typingMsPerChar: 0 },
-    opencode: { workdir: join(home, "ws"), baseUrl: "http://127.0.0.1:1", autoStart: false },
+    opencode: { workdir: join(home, "ws") },
   });
   const app = createApp(cfg);
   cleanups.push(() => void app.stop());

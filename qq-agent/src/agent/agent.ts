@@ -38,12 +38,14 @@ export interface AgentDeps {
   extraSections?: () => string[];
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** 被事件唤醒的那一轮失败(比如接口临时不可用)后,隔多久重试,默认 30 秒 */
+  retryDelayMs?: number;
   log?: (msg: string) => void;
 }
 
 type Job =
-  | { kind: "space"; space: string; mentioned: boolean; forced: boolean }
-  | { kind: "wander"; event?: string; resolve: (text: string) => void };
+  | { kind: "space"; space: string; mentioned: boolean; forced: boolean; tries?: number }
+  | { kind: "wander"; event?: string; resolve: (text: string) => void; tries?: number };
 
 const MAX_TOOL_ROUNDS = 8;
 /** 一次最多把这么多条新消息放进「现在」,更多的稍后会出现在聊天记录里 */
@@ -55,7 +57,7 @@ const MAX_CONTEXT_CHARS = 150_000;
 
 const FREE_TIME_TEXT = [
   "这是你的自由时间,现在没有人在跟你说话。",
-  "可以做的事(不是任务清单,看心情,也可以什么都不做,那就只输出 <silent/>):发一条动态、改签名/状态/头像、主动找某个人或某个群说句话、整理图库、跟进之前记下的事、看看 OpenCode 任务进展。",
+  "可以做的事(不是任务清单,看心情,也可以什么都不做,那就只输出 <silent/>):发一条动态、改签名/状态/头像、主动找某个人或某个群说句话、整理图库、跟进之前记下的事、看看后台任务(包括 OpenCode)的进展。",
   "先用 recall 看看自己最近做过什么,别重复。",
 ].join("\n");
 
@@ -226,12 +228,35 @@ export class Agent {
         }
       } catch (e) {
         this.log(`job failed: ${e instanceof Error ? e.stack ?? e.message : e}`);
-        if (job.kind === "wander") job.resolve("");
+        if (!this.retryLater(job) && job.kind === "wander") job.resolve("");
       } finally {
         this.busy = false;
       }
       await this.maintain().catch((e) => this.log(`maintenance failed: ${e}`));
     }
+  }
+
+  /**
+   * 被事件唤醒(任务完成、好友请求等)的那一轮失败了,过一会儿再试,最多 3 次。
+   * 普通的聊天消息不重试:它们还留在「新消息」里,下次有人说话时会一起处理。
+   */
+  private retryLater(job: Job): boolean {
+    const triggered = job.kind === "space" ? job.forced : !!job.event;
+    const tries = (job.tries ?? 0) + 1;
+    if (!triggered || tries > 3) return false;
+    job.tries = tries;
+    setTimeout(() => {
+      // 这个会话已经有新的一项在排队时并进去(它们会一起处理);否则把原来这一项放回去,次数接着算
+      const waiting = job.kind === "space" ? this.queue.find((j) => j.kind === "space" && j.space === job.space) : undefined;
+      if (waiting && waiting.kind === "space") {
+        waiting.mentioned = true;
+        waiting.forced = true;
+        waiting.tries = Math.max(waiting.tries ?? 0, tries);
+      } else this.queue.push(job);
+      this.pump();
+    }, (this.d.retryDelayMs ?? 30_000) * tries).unref?.();
+    this.log(`will retry in ${Math.round(((this.d.retryDelayMs ?? 30_000) * tries) / 1000)}s (attempt ${tries}/3)`);
+    return true;
   }
 
   private async shouldReply(space: string, mentioned: boolean): Promise<boolean> {

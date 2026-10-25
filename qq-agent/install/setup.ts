@@ -44,8 +44,8 @@ merged.napcat.token = wsToken;
 merged.napcat.webuiUrl = `http://127.0.0.1:${webui.port}/webui?token=${webui.token}`;
 if (!merged.opencode.workdir) merged.opencode.workdir = workdir;
 merged.opencode.bin = opencodeBin;
-// OpenCode 由 qq-agent 服务统一管理,Agent 不再自己拉起,避免重复进程
-if (existing?.opencode?.autoStart === undefined) merged.opencode.autoStart = false;
+// 旧版本里 OpenCode 是常驻服务,这些设置已经不用了,清掉(其中有密码)
+for (const k of ["baseUrl", "autoStart", "password"]) delete (merged.opencode as Record<string, unknown>)[k];
 writeJson(cfgPath, merged);
 
 // NapCat 的 OneBot 配置:onebot11.json 是新账号的模板;已登录过的账号有自己的 onebot11_<QQ号>.json,一并改掉

@@ -132,13 +132,10 @@ const SETTINGS = [
     ['napcat.webuiUrl', '管理界面地址', 'text', { hint: '扫码登录用' }],
   ]],
   ['OpenCode', [
-    ['opencode.workdir', '工作目录', 'text'],
-    ['opencode.baseUrl', '服务地址', 'text'],
-    ['opencode.autoStart', '没运行时自动启动', 'bool'],
-    ['opencode.bin', '可执行文件', 'text'],
+    ['opencode.workdir', '工作目录', 'text', { hint: 'Agent 的 shell 和 OpenCode 都在这里干活' }],
+    ['opencode.bin', '可执行文件', 'text', { hint: '安装时已填好,一般不用改' }],
     ['opencode.model', '模型', 'text', { hint: '格式 provider/model,如 deepseek/deepseek-flash' }],
     ['opencode.apiKey', 'DeepSeek Key', 'password', { hint: '留空则使用上面的 API Key' }],
-    ['opencode.password', '服务密码', 'password', { hint: '可选' }],
   ]],
   ['控制台', [['web.port', '端口', 'number', { hint: '修改后需要重启 Agent' }]]],
 ];
@@ -150,7 +147,7 @@ const tabs = {
     const dot = (ok) => el('span', { class: 'dot' + (ok ? ' ok' : '') });
     root.append(el('div', { class: 'card' }, el('h2', {}, '运行状态'), el('div', { class: 'grid' },
       card('QQ(NapCat)', el('b', {}, dot(s.napcat.connected), s.napcat.connected ? '已连接 ' + (s.napcat.selfId ?? '') : '未连接')),
-      card('OpenCode', el('b', {}, dot(s.opencode.healthy), s.opencode.healthy ? '运行中' : '未运行', s.opencode.running ? ` · ${s.opencode.running} 个任务` : '')),
+      card('后台任务', el('b', {}, s.jobs.running ? s.jobs.running + ' 个运行中' : '没有在跑的')),
       card('会话数', el('b', {}, s.spaces)),
       card('记忆条数', el('b', {}, s.memories)),
       card('图库', el('b', {}, s.media)),
@@ -162,7 +159,7 @@ const tabs = {
       el('div', { class: 'row', style: 'margin-bottom:12px' },
         el('a', { href: s.napcat.webuiUrl, target: '_blank', rel: 'noopener' }, el('button', { class: 'b' }, '打开 NapCat 管理界面(扫码登录 QQ)')),
         el('span', { class: 'muted' }, 'QQ 小号需要在 NapCat 里扫码登录一次')),
-      svc('napcat', 'NapCat'), svc('opencode', 'OpenCode'), svc('agent', 'Agent')));
+      svc('napcat', 'NapCat'), svc('agent', 'Agent')));
     const upBody = el('div', {}, el('span', { class: 'muted' }, '正在检查…'));
     root.append(el('div', { class: 'card' }, el('h2', {}, '版本与更新'), upBody));
     const showLog = guard(async () => {
@@ -341,25 +338,35 @@ const tabs = {
     load();
   },
 
-  async opencode(root) {
-    const rows = await api('/api/tasks');
-    root.append(el('div', { class: 'card' }, el('h2', {}, 'OpenCode 任务'),
-      rows.length ? el('table', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, '状态'), el('th', {}, '来自'), el('th', {}, '任务'), el('th', {}, '')),
-        rows.map((t) => el('tr', {}, el('td', {}, t.id), el('td', {}, el('span', { class: 'tag' }, t.status)), el('td', {}, t.space), el('td', {}, t.prompt.slice(0, 120) + (t.result ? '\n→ ' + t.result.slice(0, 160) : '')),
-          el('td', {}, t.status === 'running' ? el('button', { class: 'b s d', onclick: guard(async () => { await api(`/api/tasks/${t.id}/abort`, 'POST'); show('opencode'); }) }, '中止') : null)))) : el('p', { class: 'muted' }, '还没有任务。')));
+  async jobs(root) {
+    const rows = await api('/api/jobs');
+    const stateOf = (t) => ({ running: '运行中', done: '完成', aborted: '已中止' }[t.status] || '失败' + (t.exitCode != null ? ' (' + t.exitCode + ')' : ''));
+    const table = el('table', {}, el('tr', {}, el('th', {}, '#'), el('th', {}, '状态'), el('th', {}, '来自'), el('th', {}, '命令'), el('th', {}, '')));
+    for (const t of rows) {
+      const out = el('pre', { style: 'display:none;margin:6px 0 0' });
+      const view = el('button', { class: 'b s', onclick: guard(async () => {
+        if (out.style.display === 'none') { out.textContent = (await api('/api/jobs/' + t.id)).output || '(没有输出)'; out.style.display = ''; } else out.style.display = 'none';
+      }) }, '输出');
+      const stop = t.status === 'running' ? el('button', { class: 'b s d', onclick: guard(async () => { await api(`/api/jobs/${t.id}/abort`, 'POST'); show('jobs'); }) }, '中止') : null;
+      table.append(el('tr', {}, el('td', {}, t.id), el('td', {}, el('span', { class: 'tag' }, stateOf(t))), el('td', {}, t.space),
+        el('td', {}, t.command.slice(0, 160), out), el('td', {}, view, stop)));
+    }
+    root.append(el('div', { class: 'card' }, el('h2', {}, '后台任务'),
+      el('p', { class: 'muted' }, 'Agent 用 shell 的后台模式启动的命令,包括交给 OpenCode 的活。结束后它会收到通知并向发起的聊天汇报。'),
+      rows.length ? table : el('p', { class: 'muted' }, '还没有任务。')));
   },
 
   async logs(root) {
     let name = 'agent';
     const pre = el('pre', {}, '加载中…');
     const load = guard(async () => { const r = await api(`/api/logs/${name}?lines=300`); pre.textContent = r.text || '(没有日志)'; pre.scrollTop = pre.scrollHeight; });
-    const sel = el('select', { onchange: (e) => { name = e.target.value; load(); } }, ['agent', 'napcat', 'opencode'].map((n) => el('option', { value: n }, n)));
+    const sel = el('select', { onchange: (e) => { name = e.target.value; load(); } }, ['agent', 'napcat'].map((n) => el('option', { value: n }, n)));
     root.append(el('div', { class: 'card' }, el('div', { class: 'row', style: 'margin-bottom:10px' }, sel, el('button', { class: 'b s', onclick: load }, '刷新')), pre));
     load();
   },
 };
 
-const NAMES = { overview: '概览', settings: '设置', spaces: '会话', context: '上下文', memories: '记忆', media: '图库', opencode: 'OpenCode', logs: '日志' };
+const NAMES = { overview: '概览', settings: '设置', spaces: '会话', context: '上下文', memories: '记忆', media: '图库', jobs: '后台任务', logs: '日志' };
 let current = location.hash.slice(1) || 'overview';
 async function show(name) {
   current = tabs[name] ? name : 'overview';

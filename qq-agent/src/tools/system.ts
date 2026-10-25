@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defineTool, type Tool } from "../agent/tools";
+import type { JobManager } from "../jobs/jobs";
 
 const OUT_LIMIT = 8000;
 
@@ -16,8 +17,8 @@ export interface ShellResult {
   timedOut: boolean;
 }
 
-export async function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellResult> {
-  const proc = Bun.spawn(["bash", "-c", command], { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+export async function runShell(command: string, cwd: string, timeoutMs: number, env: Record<string, string> = {}): Promise<ShellResult> {
+  const proc = Bun.spawn(["bash", "-c", command], { cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -29,20 +30,38 @@ export async function runShell(command: string, cwd: string, timeoutMs: number):
   return { code: timedOut ? null : code, output: `${out}${err ? `\n[stderr]\n${err}` : ""}`.trim(), timedOut };
 }
 
-/** 只给 Agent 保留少量直接动手的能力:执行命令(用来管理 OpenCode)和看文件 */
-export function systemTools(workdir: () => string): Tool[] {
+export interface SystemToolsOptions {
+  /** 后台任务;没有时 shell 不支持 background */
+  jobs?: JobManager;
+  /** 每条命令都带上的环境变量 */
+  env?: () => Record<string, string>;
+}
+
+/** 只给 Agent 保留少量直接动手的能力:执行命令(包括在后台启动 OpenCode)和看文件 */
+export function systemTools(workdir: () => string, opts: SystemToolsOptions = {}): Tool[] {
   return [
     defineTool(
       "shell",
-      "在服务器上执行一条 bash 命令,主要用来管理 OpenCode(启停、看日志、改配置)。复杂的工作请交给 OpenCode,不要自己用它写代码。",
+      "在服务器上执行一条 bash 命令:管理 OpenCode、看日志、改配置,以及在后台启动 OpenCode 干活。" +
+        "几秒钟能跑完的命令直接执行;会跑很久的(尤其是 OpenCode)必须设 background=true,它会立刻返回任务号,结束时再通知你。" +
+        "复杂的工作请交给 OpenCode,不要自己用它写代码。",
       {
         command: { type: "string" },
-        timeout_seconds: { type: "number", description: "默认 60,最大 600" },
+        background: { type: "boolean", description: "放到后台执行,立刻返回任务号,结束后通知你。默认 false" },
+        timeout_seconds: { type: "number", description: "前台执行的超时,默认 60,最大 600" },
+        timeout_minutes: { type: "number", description: "后台任务的超时,默认 120,最大 720" },
       },
       ["command"],
-      async (a) => {
+      async (a, ctx) => {
+        const command = String(a.command ?? "");
+        const env = opts.env?.() ?? {};
+        if (a.background) {
+          if (!opts.jobs) return "后台执行没有启用";
+          const job = opts.jobs.start(ctx.space, command, Number(a.timeout_minutes) || undefined);
+          return `已在后台启动,任务 #${job.id}。结束时会通知你,不用等;想看进度用 job_result。`;
+        }
         const timeout = Math.min(Math.max(Number(a.timeout_seconds) || 60, 1), 600) * 1000;
-        const r = await runShell(String(a.command ?? ""), workdir(), timeout);
+        const r = await runShell(command, workdir(), timeout, env);
         const head = r.timedOut ? "[超时被终止]" : `[退出码 ${r.code}]`;
         return `${head}\n${clip(r.output)}`;
       },

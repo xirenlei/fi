@@ -4,7 +4,7 @@
 NapCat 登录一个 QQ 小号,Agent 通过它收发消息、管理这个号,实际的工作交给 OpenCode 去做。
 
 ```
-QQ 小号 ── NapCat (OneBot 11, WebSocket) ── Agent ── OpenCode (opencode serve)
+QQ 小号 ── NapCat (OneBot 11, WebSocket) ── Agent ──(shell 后台启动)── OpenCode (opencode run)
                                              │
                                              ├─ 所有会话(每个群、每个私聊)的近期聊天、摘要和长期记忆都在同一个上下文里
                                              ├─ 近期消息 100~200 条,涨满就把最老的 100 条整理成摘要;长期记忆太长时让模型合并
@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/xirenlei/fi/main/qq-agent/install/i
 3. 安装最新版 OpenCode
 4. 调用 NapCat 官方安装脚本,免 root 把 QQ 与 NapCat 装到 `~/Napcat`(QQ 从腾讯官方地址下载)
 5. 写好配置(随机生成 NapCat 的访问 token,管理界面只监听本机)
-6. 注册三个用户级 systemd 服务(没有 systemd 时用简易守护),并在桌面放一个「QQ Agent」图标
+6. 注册两个用户级 systemd 服务(NapCat、Agent)(没有 systemd 时用简易守护),并在桌面放一个「QQ Agent」图标
 7. 启动全部服务
 
 装完后:
@@ -42,9 +42,9 @@ curl -fsSL https://raw.githubusercontent.com/xirenlei/fi/main/qq-agent/install/i
 ## 日常使用
 
 ```bash
-qq-agent status                 # 三个服务的状态
-qq-agent restart [napcat|opencode|agent]
-qq-agent logs agent             # 也可以 napcat / opencode
+qq-agent status                 # 两个服务的状态
+qq-agent restart [napcat|agent]
+qq-agent logs agent             # 也可以 napcat
 qq-agent open                   # 打开控制台
 ```
 
@@ -113,9 +113,22 @@ NapCat 没有「主动加好友」和「主动拉人进群」的接口,所以这
 
 ### OpenCode
 
-它把任务交给 OpenCode 后台执行,**完成后主动向发起任务的聊天汇报**(自己在自由时间提交的任务,完成后会唤醒它自己处理)。
-OpenCode 使用与 Agent 相同的 DeepSeek Key(也可单独设置),工作目录默认 `~/.config/qq-agent/workspace`,
-权限已放开(无人值守时不会卡在确认上),所以请把它跑在专用机器上。
+OpenCode 不再是常驻服务。Agent 想让它干活时,就用自己的 `shell` 工具在后台启动命令行:
+
+```
+opencode run --auto -m deepseek/deepseek-flash '任务描述'
+```
+
+shell 的 `background` 模式会立刻返回任务号,命令在脱离 Agent 的 bash 里跑,输出写进 `~/.config/qq-agent/jobs/`,
+结束时把**退出码**写进一个文件。Agent 每 2 秒看一眼:退出码出现了就收尾,把退出码和输出末尾作为一条系统消息交给模型,
+由它**主动向发起任务的聊天汇报**(自己在自由时间启动的任务,完成后会唤醒它自己处理)。
+
+- 靠退出码判断结果:报错、模型不存在、被杀掉都会得到明确的失败汇报,不会悄悄丢掉。
+- Agent 重启、更新期间任务照常运行;重启后接着盯,期间结束的任务会补上汇报。
+- 汇报那一轮模型接口临时出错时,会自动重试(最多 3 次)。
+- 后台任务默认最长 120 分钟,超时会被终止;`job_list` / `job_result` / `job_abort` 可查看和中止,控制台「后台任务」页也能看。
+- OpenCode 使用与 Agent 相同的 DeepSeek Key(也可单独设置),通过环境变量传入,不写进提示词和命令;同时关掉它的自动升级。
+- 工作目录默认 `~/.config/qq-agent/workspace`,`--auto` 会自动批准没被明确拒绝的权限(无人值守时不会卡在确认上),所以请把它跑在专用机器上。
 
 ## 更新
 
@@ -124,8 +137,8 @@ OpenCode 使用与 Agent 相同的 DeepSeek Key(也可单独设置),工作目录
 - 控制台「概览」页的「版本与更新」卡片:显示当前版本和新提交列表,点「更新」即可,过程实时显示。
 - 命令行:`qq-agent update`(只检查不更新:`qq-agent update --check`;当前版本:`qq-agent version`)。
 
-更新会先备份当前代码、配置和数据库,再拉取新代码、应用、只重启 Agent(NapCat 和 OpenCode 不动,QQ 不会掉线,
-正在跑的 OpenCode 任务不受影响),然后检查新版本能不能正常启动,**不能就自动回滚**到更新前的版本。
+更新会先备份当前代码、配置和数据库,再拉取新代码、应用、只重启 Agent(NapCat 不动,QQ 不会掉线,
+正在跑的后台任务不受影响),然后检查新版本能不能正常启动,**不能就自动回滚**到更新前的版本。
 配置、聊天记录、记忆、图库、QQ 登录状态都保留。OpenCode 不会随更新升级(要升级:`QQA_UPDATE_OPENCODE=1` 重新运行安装命令)。
 数据库结构以后若有变化,更新时会自动升级,旧数据不丢。
 
@@ -133,7 +146,7 @@ OpenCode 使用与 Agent 相同的 DeepSeek Key(也可单独设置),工作目录
 
 ```bash
 cd qq-agent
-bun test            # 测试(用模拟的 NapCat / 模型 / OpenCode 服务)
+bun test            # 测试(用模拟的 NapCat / 模型服务,后台任务用真实的子进程)
 bun run typecheck
 bun run start       # 用 ~/.config/qq-agent 的配置运行
 ```
@@ -147,7 +160,7 @@ bun run start       # 用 ~/.config/qq-agent 的配置运行
 | `src/llm/` | Chat Completions 客户端 |
 | `src/memory/` | SQLite 存储、摘要 |
 | `src/media/` | 图库、抽帧、描述索引、收发 |
-| `src/opencode/` | OpenCode 进程与任务管理 |
+| `src/jobs/` | 后台任务(shell 后台模式、OpenCode 用法提示) |
 | `src/web/` | 本地控制台 |
 | `install/` | 安装脚本、服务管理命令、配置写入 |
 
@@ -155,4 +168,4 @@ bun run start       # 用 ~/.config/qq-agent 的配置运行
 
 - 控制台只监听 `127.0.0.1`,校验 Host,写操作需要自定义请求头;要远程访问请用 SSH 端口转发。
 - NapCat 的 WebSocket 和管理界面也只监听本机,WebSocket 带随机 token。
-- Agent 的 shell/读文件等工具没有硬性权限限制,靠提示词约束;OpenCode 的权限也是放开的。请只在专用机器上运行。
+- Agent 的 shell/读文件等工具没有硬性权限限制,靠提示词约束;OpenCode 以 `--auto` 运行,权限也是放开的。请只在专用机器上运行。

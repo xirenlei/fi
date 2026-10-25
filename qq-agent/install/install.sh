@@ -176,6 +176,16 @@ case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR 不在 PATH 里,新开终
 
 # ---------- 7. 服务 ----------
 step "注册服务"
+# 旧版本有一个常驻的 OpenCode 服务;现在 Agent 需要时直接调用 opencode 命令行,不再常驻,把旧的停掉清理掉
+if [ -f "$DATA_DIR/run/opencode.pid" ]; then
+  kill -- "-$(cat "$DATA_DIR/run/opencode.pid")" 2>/dev/null || kill "$(cat "$DATA_DIR/run/opencode.pid")" 2>/dev/null || true
+  rm -f "$DATA_DIR/run/opencode.pid"
+fi
+if systemctl --user show-environment >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/qq-agent-opencode.service" ]; then
+  systemctl --user disable --now qq-agent-opencode.service >/dev/null 2>&1 || true
+  rm -f "$HOME/.config/systemd/user/qq-agent-opencode.service"
+  echo "已移除旧的 OpenCode 常驻服务"
+fi
 if systemctl --user show-environment >/dev/null 2>&1; then
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
@@ -201,10 +211,9 @@ WantedBy=default.target
 UNIT
   }
   mk_unit napcat "NapCat (QQ)"
-  mk_unit opencode "OpenCode"
-  mk_unit agent "Agent" "qq-agent-napcat.service qq-agent-opencode.service"
+  mk_unit agent "Agent" "qq-agent-napcat.service"
   systemctl --user daemon-reload
-  systemctl --user enable qq-agent-napcat.service qq-agent-opencode.service qq-agent-agent.service >/dev/null 2>&1
+  systemctl --user enable qq-agent-napcat.service qq-agent-agent.service >/dev/null 2>&1
   loginctl enable-linger "$USER" >/dev/null 2>&1 || warn "无法开启 linger:退出登录后服务可能停止(可手动执行 sudo loginctl enable-linger $USER)"
   echo "已注册 systemd 用户服务"
 else
@@ -250,6 +259,6 @@ ${c_ok}安装完成。${c_off} 接下来三步:
      在「设置」里填入 DeepSeek API Key,并把你自己的 QQ 号填进「管理员」
   3. 用另一个 QQ 号给小号发消息试试
 
-常用命令: qq-agent status | restart | logs agent | logs napcat | logs opencode
+常用命令: qq-agent status | restart | logs agent | logs napcat
 配置文件: $DATA_DIR/config.json  (含密钥,不要提交或分享)
 DONE
