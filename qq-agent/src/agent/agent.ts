@@ -1,14 +1,16 @@
 import type { Config } from "../config";
-import { LlmClient, LlmError, flattenHistory, stripAllReasoning, textOf, type ChatMessage } from "../llm/client";
+import { LlmClient, LlmError, stripAllReasoning, textOf, type ChatMessage } from "../llm/client";
 import type { Db, StoredMessage } from "../memory/db";
-import { maybeSummarize } from "../memory/summarize";
+import { consolidateMemories } from "../memory/consolidate";
+import { compactSpace } from "../memory/summarize";
 import { isMessageEvent } from "../napcat/client";
 import { displayName, parseMessage, seg, type ParsedMessage } from "../napcat/parse";
 import { parseSpace, spaceOf, type OneBotEvent, type Segment, type SpaceId } from "../napcat/types";
+import { renderContext, type SpaceBlock } from "./context";
 import { interpretEvent, requestGuidance } from "./events";
 import { judgeReply } from "./judge";
 import { parseOutput, plainLength, type OutMessage, type OutPart } from "./output";
-import { buildSystemPrompt, formatNewMessages, formatTime } from "./prompt";
+import { buildSystemPrompt } from "./prompt";
 import type { ToolContext, ToolRegistry } from "./tools";
 
 export interface NapcatLike {
@@ -39,34 +41,34 @@ export interface AgentDeps {
   log?: (msg: string) => void;
 }
 
-interface SpaceState {
-  running: boolean;
-  dirty: boolean;
-  mentioned: boolean;
-  /** 系统通知触发:必须让模型处理,不走群聊判定 */
-  forced: boolean;
-  lastSpoke: number | null;
-}
+type Job =
+  | { kind: "space"; space: string; mentioned: boolean; forced: boolean }
+  | { kind: "wander"; event?: string; resolve: (text: string) => void };
 
 const MAX_TOOL_ROUNDS = 8;
-
-const AUTONOMY_SECTION = [
-  "# 自主行动",
-  "你不只是被动回复:有人找你时你回应他们,没人找你时你也有自己的生活——发动态、改签名和状态、整理表情包、主动找朋友聊两句、跟进之前答应过的事。",
-  "但要克制:",
-  "- 主动找人要有理由(跟进某件事、分享有意思的东西、很久没聊的熟人),别无缘无故刷存在感,别连发,别在群里无话找话。",
-  "- 动态别发太频繁,内容要符合你的人设;发之前 recall 一下最近发过什么。",
-  "- 做完什么用 remember 记一笔(subject 写 global),下次才知道自己做过什么。",
-  "- 没什么想做的就什么都不做,输出 <silent/> 即可。这完全正常。",
-].join("\n");
+/** 一次最多把这么多条新消息放进「现在」,更多的稍后会出现在聊天记录里 */
 const MAX_PENDING = 60;
+/** 其他会话积压的新消息到这个数,就并进它们自己的会话块(会让缓存失效一次,所以不能太频繁) */
+const MERGE_UNSEEN_AT = 50;
+/** 上下文总字数的保险丝 */
+const MAX_CONTEXT_CHARS = 150_000;
+
+const FREE_TIME_TEXT = [
+  "这是你的自由时间,现在没有人在跟你说话。",
+  "可以做的事(不是任务清单,看心情,也可以什么都不做,那就只输出 <silent/>):发一条动态、改签名/状态/头像、主动找某个人或某个群说句话、整理图库、跟进之前记下的事、看看 OpenCode 任务进展。",
+  "先用 recall 看看自己最近做过什么,别重复。",
+].join("\n");
 
 export class Agent {
-  private states = new Map<string, SpaceState>();
-  private inflight = new Set<Promise<void>>();
+  /** 全局排队:一次只处理一件事,处理完才轮到下一件,先来后到,没有任何特权 */
+  private queue: Job[] = [];
+  private pumping: Promise<void> | null = null;
+  private busy = false;
+  private lastSpoke = new Map<string, number>();
   private pendingImages = new Map<string, string[]>();
-  /** 接口拒绝历史轮次里的思考内容时置位,之后不再回传历史思考 */
-  private rejectHistoryReasoning = false;
+  /** 接口不接受回传思考内容时置位,之后调用都不再带 */
+  private noReasoning = false;
+  private lastConsolidateFail = 0;
 
   constructor(private d: AgentDeps) {}
 
@@ -78,16 +80,12 @@ export class Agent {
     return Math.floor((this.d.now?.() ?? Date.now()) / 1000);
   }
 
-  private state(space: string): SpaceState {
-    let s = this.states.get(space);
-    if (!s) this.states.set(space, (s = { running: false, dirty: false, mentioned: false, forced: false, lastSpoke: null }));
-    return s;
+  /** 等排队的事情都处理完(测试用) */
+  async idle(): Promise<void> {
+    while (this.pumping || this.queue.length) await (this.pumping ?? Promise.resolve());
   }
 
-  /** 等所有进行中的处理结束(测试用) */
-  async idle(): Promise<void> {
-    while (this.inflight.size) await Promise.all([...this.inflight]);
-  }
+  // ───────────── 收事件 ─────────────
 
   async handleEvent(ev: OneBotEvent): Promise<void> {
     if (!isMessageEvent(ev)) return this.handleOtherEvent(ev);
@@ -124,7 +122,7 @@ export class Agent {
     if (!mentioned && parsed.replyToId != null) {
       mentioned = this.d.db.findByMsgId(space, parsed.replyToId)?.role === "self";
     }
-    this.trigger(space, mentioned, false);
+    this.enqueueSpace(space, mentioned, false);
   }
 
   /** 好友请求、入群邀请、被戳、有人进退群等非聊天事件 */
@@ -143,26 +141,14 @@ export class Agent {
       void this.wander(act.text).catch((e) => this.log(`wander failed: ${e}`));
     } else {
       this.d.db.addMessage({ space: act.space, msgId: null, ts: this.nowSec(), senderId: act.senderId, senderName: "系统", role: "user", text: act.text });
-      if (act.trigger !== "none") this.trigger(act.space, act.trigger === "mention", false);
+      if (act.trigger !== "none") this.enqueueSpace(act.space, act.trigger === "mention", false);
     }
   }
 
   /** 系统事件(例如 OpenCode 任务完成):写入一条系统消息并让模型处理,由模型决定怎么向用户汇报 */
   notify(space: string, text: string): void {
     this.d.db.addMessage({ space, msgId: null, ts: this.nowSec(), senderId: 0, senderName: "系统", role: "user", text });
-    this.trigger(space, true, true);
-  }
-
-  private trigger(space: string, mentioned: boolean, forced: boolean) {
-    const st = this.state(space);
-    st.dirty = true;
-    st.mentioned ||= mentioned;
-    st.forced ||= forced;
-    if (!st.running) {
-      st.running = true;
-      const p = this.drain(space).finally(() => this.inflight.delete(p));
-      this.inflight.add(p);
-    }
+    this.enqueueSpace(space, true, true);
   }
 
   private async ensureTitle(space: string, fallback: string) {
@@ -181,23 +167,57 @@ export class Agent {
     this.d.db.setTitle(space, title);
   }
 
-  private async drain(space: string) {
-    const st = this.state(space);
-    try {
-      while (st.dirty) {
-        st.dirty = false;
-        const mentioned = st.mentioned;
-        const forced = st.forced;
-        st.mentioned = false;
-        st.forced = false;
-        try {
-          if (forced || (await this.shouldReply(space, mentioned))) await this.respond(space);
-        } catch (e) {
-          this.log(`error in ${space}: ${e instanceof Error ? e.stack ?? e.message : e}`);
+  // ───────────── 排队 ─────────────
+
+  /** 同一个会话已经在排队时,新消息并进那一项(它们会一起处理),不重复排 */
+  private enqueueSpace(space: string, mentioned: boolean, forced: boolean) {
+    const waiting = this.queue.find((j): j is Extract<Job, { kind: "space" }> => j.kind === "space" && j.space === space);
+    if (waiting) {
+      waiting.mentioned ||= mentioned;
+      waiting.forced ||= forced;
+    } else {
+      this.queue.push({ kind: "space", space, mentioned, forced });
+    }
+    this.pump();
+  }
+
+  /**
+   * 自由时间。event 不为空表示被某件事唤醒(好友请求、OpenCode 任务完成等),要排队,不会丢;
+   * 没有 event 的是定时唤醒,现在不空闲就直接放弃。返回模型最后说的话(通常是它做了什么的小结)。
+   */
+  wander(event?: string): Promise<string> {
+    if (!event && (this.busy || this.queue.length)) return Promise.resolve("");
+    return new Promise((resolve) => {
+      this.queue.push({ kind: "wander", event, resolve });
+      this.pump();
+    });
+  }
+
+  private pump() {
+    if (this.pumping) return;
+    this.pumping = this.runQueue().finally(() => {
+      this.pumping = null;
+      if (this.queue.length) this.pump();
+    });
+  }
+
+  private async runQueue() {
+    while (this.queue.length) {
+      const job = this.queue.shift()!;
+      this.busy = true;
+      try {
+        if (job.kind === "space") {
+          if (job.forced || (await this.shouldReply(job.space, job.mentioned))) await this.respond(job.space);
+        } else {
+          job.resolve(await this.doWander(job.event));
         }
+      } catch (e) {
+        this.log(`job failed: ${e instanceof Error ? e.stack ?? e.message : e}`);
+        if (job.kind === "wander") job.resolve("");
+      } finally {
+        this.busy = false;
       }
-    } finally {
-      st.running = false;
+      await this.maintain().catch((e) => this.log(`maintenance failed: ${e}`));
     }
   }
 
@@ -205,8 +225,8 @@ export class Agent {
     const cfg = this.d.cfg();
     if (parseSpace(space).type === "private") return true;
     if (mentioned && cfg.group.alwaysReplyWhenMentioned) return true;
-    const st = this.state(space);
-    const since = st.lastSpoke == null ? null : this.nowSec() - st.lastSpoke;
+    const last = this.lastSpoke.get(space);
+    const since = last == null ? null : this.nowSec() - last;
     if (since != null && since < cfg.group.cooldownSeconds) return false;
     return judgeReply(this.d.llm, cfg.llm.lightModel, {
       persona: cfg.persona,
@@ -215,176 +235,129 @@ export class Agent {
     });
   }
 
-  private memorySubjects(space: string, senders: number[]): string[] {
-    const subjects = new Set<string>(["global", `space:${space}`]);
-    for (const s of senders) subjects.add(`user:${s}`);
-    return [...subjects];
+  // ───────────── 拼上下文、调用模型 ─────────────
+
+  private systemPrompt(): string {
+    return buildSystemPrompt({
+      persona: this.d.cfg().persona,
+      admins: this.d.cfg().admins,
+      extraSections: [...(this.d.extraSections?.() ?? []), ...(this.d.media?.promptSection ? [this.d.media.promptSection()] : [])],
+    });
+  }
+
+  /** 拼出「所有会话」的上下文文本。active 是正在处理的会话,没有则是自由时间 */
+  buildContext(opts: { active?: { space: string; pending: StoredMessage[]; hidden: number }; free?: string }): string {
+    const db = this.d.db;
+    const cfg = this.d.cfg();
+    const activeSpace = opts.active?.space;
+
+    // 其他会话积压太多的新消息,并进它们自己的块(这会让缓存失效一次,所以要攒到一定数量)
+    for (const sp of db.listSpaces()) {
+      if (sp !== activeSpace && db.unseenCount(sp) >= MERGE_UNSEEN_AT) db.markIncluded(db.unseen(sp).map((m) => m.id));
+    }
+
+    const rows = db.contextSpaces();
+    const blocks: Array<SpaceBlock & { last: number }> = [];
+    for (const r of rows) {
+      const messages = db.included(r.space);
+      if (messages.length) blocks.push({ space: r.space, title: r.title, messages, last: db.lastInc(r.space) });
+    }
+    // 最久没动静的在前,正在处理的放最后:切换会话时只有后面的块失效
+    blocks.sort((a, b) => (a.space === activeSpace ? 1 : b.space === activeSpace ? -1 : a.last - b.last));
+
+    const others: SpaceBlock[] = [];
+    for (const sp of db.listSpaces()) {
+      if (sp === activeSpace) continue;
+      const messages = db.unseen(sp, MERGE_UNSEEN_AT);
+      if (messages.length) others.push({ space: sp, title: db.getSpace(sp).title, messages });
+    }
+
+    return renderContext({
+      now: new Date(this.d.now?.() ?? Date.now()),
+      selfId: this.d.napcat.selfId,
+      memories: db.allMemories(),
+      summaries: rows.filter((r) => r.summary).map((r) => ({ space: r.space, title: r.title, summary: r.summary })),
+      blocks,
+      others,
+      active: opts.active ? { ...opts.active, title: db.getSpace(opts.active.space).title } : undefined,
+      free: opts.free,
+      maxChars: MAX_CONTEXT_CHARS,
+    });
   }
 
   private async respond(space: string) {
-    const cfg = this.d.cfg();
     const db = this.d.db;
-    const row = db.getSpace(space);
-    const pending = db.messagesAfter(space, row.llmCursor, MAX_PENDING).filter((m) => m.role === "user");
-    if (!pending.length) return;
-    const firstRow = pending[0]!.id;
-    const lastRow = pending.at(-1)!.id;
-    const senders = [...new Set(pending.map((m) => m.senderId))];
+    const unseen = db.unseen(space);
+    if (!unseen.length) return;
+    const shown = unseen.slice(-MAX_PENDING);
+    const text = this.buildContext({ active: { space, pending: shown, hidden: unseen.length - shown.length } });
 
-    const system = buildSystemPrompt({
-      persona: cfg.persona,
-      space,
-      spaceTitle: row.title,
-      isGroup: parseSpace(space).type === "group",
-      summary: row.summary,
-      admins: cfg.admins,
-      memories: db.memoriesFor(this.memorySubjects(space, senders)).slice(-40),
-      otherSummaries: db.otherSpaceSummaries(space),
-      extraSections: [...(this.d.extraSections?.() ?? []), ...(this.d.media?.promptSection ? [this.d.media.promptSection()] : [])],
-      now: new Date((this.d.now?.() ?? Date.now())),
-    });
-
-    const history = flattenHistory(
-      db.turns<ChatMessage>(space),
-      this.rejectHistoryReasoning ? 0 : cfg.llm.reasoningRounds,
-    );
-    const userText = formatNewMessages(pending);
     const images = this.pendingImages.get(space) ?? [];
     this.pendingImages.delete(space);
-    const liveUser: ChatMessage = {
+    const user: ChatMessage = {
       role: "user",
-      content: images.length
-        ? [{ type: "text", text: userText }, ...images.map((url) => ({ type: "image_url" as const, image_url: { url } }))]
-        : userText,
+      content: images.length ? [{ type: "text", text }, ...images.map((url) => ({ type: "image_url" as const, image_url: { url } }))] : text,
     };
-    const storedUser: ChatMessage = { role: "user", content: userText };
+    const messages: ChatMessage[] = [{ role: "system", content: this.systemPrompt() }, user];
+    const finalText = await this.runLoop(messages, { space, triggerSenderIds: [...new Set(unseen.map((m) => m.senderId))] });
 
-    const turn: ChatMessage[] = [];
-    const messages: ChatMessage[] = [{ role: "system", content: system }, ...history, liveUser];
-    const finalText = await this.runLoop(messages, turn, history.length + 1, { space, triggerSenderIds: senders });
-
-    db.addTurn(space, firstRow, lastRow, [storedUser, ...turn]);
-    db.setCursor(space, lastRow);
-
+    // 处理成功才算「看过」:这批新消息并入这个会话的块,接着是她发出去的回复(addMessage 会给自己的消息直接编号)
+    db.markIncluded(unseen.map((m) => m.id));
     const out = parseOutput(finalText);
     if (out.length) {
       await this.sendAll(space, out);
-      this.state(space).lastSpoke = this.nowSec();
-    }
-
-    try {
-      await maybeSummarize(db, this.d.llm, cfg.llm.lightModel, space, cfg.memory.windowSize);
-    } catch (e) {
-      this.log(`summarize failed for ${space}: ${e}`);
+      this.lastSpoke.set(space, this.nowSec());
     }
   }
 
-  /** 调用模型并处理工具调用,直到模型给出最终文字。每条新消息会同时追加到 messages 和 turn */
-  private async runLoop(messages: ChatMessage[], turn: ChatMessage[], historyEnd: number, ctx: ToolContext): Promise<string> {
+  private async doWander(event?: string): Promise<string> {
+    const free = event ? `刚刚发生了一件事:\n${event}\n\n你可以据此做点什么(比如处理请求、通知相关的人、继续后续工作),也可以只是记下来。` : FREE_TIME_TEXT;
+    const text = this.buildContext({ free });
+    const messages: ChatMessage[] = [
+      { role: "system", content: this.systemPrompt() },
+      { role: "user", content: text },
+    ];
+    const out = await this.runLoop(messages, { space: "self", triggerSenderIds: [] });
+    return out.replace(/<\/?silent\s*\/?>/g, "").trim();
+  }
+
+  /** 调用模型并处理工具调用,直到模型给出最终文字。思考内容只在这个循环里往返带着,循环结束就丢 */
+  private async runLoop(messages: ChatMessage[], ctx: ToolContext): Promise<string> {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const msg = await this.callModel(messages, historyEnd);
-      turn.push(msg);
+      const msg = await this.callModel(messages);
       messages.push(msg);
       if (!msg.tool_calls?.length) return textOf(msg);
       for (const call of msg.tool_calls) {
         const out = await this.d.tools.run(call.function.name, call.function.arguments, ctx);
-        const toolMsg: ChatMessage = { role: "tool", tool_call_id: call.id, content: out };
-        turn.push(toolMsg);
-        messages.push(toolMsg);
+        messages.push({ role: "tool", tool_call_id: call.id, content: out });
       }
     }
     return "";
   }
+
+  private async callModel(messages: ChatMessage[]): Promise<ChatMessage> {
+    const cfg = this.d.cfg();
+    const opts = { model: cfg.llm.model, thinking: cfg.llm.thinking, tools: this.d.tools.defs };
+    if (this.noReasoning) return (await this.d.llm.chat({ ...opts, messages: stripAllReasoning(messages) })).message;
+    try {
+      return (await this.d.llm.chat({ ...opts, messages })).message;
+    } catch (e) {
+      if (!(e instanceof LlmError) || e.status !== 400 || !/reasoning/i.test(e.body ?? "")) throw e;
+      this.noReasoning = true;
+      this.log("API rejected reasoning_content; stopping passback");
+      return (await this.d.llm.chat({ ...opts, messages: stripAllReasoning(messages) })).message;
+    }
+  }
+
+  // ───────────── 发消息 ─────────────
 
   /** 主动向某个会话发消息(工具和自主行动用),返回实际发出的条数 */
   async say(space: string, raw: string): Promise<number> {
     const out = parseOutput(raw);
     if (!out.length) return 0;
     const sent = await this.sendAll(space, out);
-    if (sent) this.state(space).lastSpoke = this.nowSec();
+    if (sent) this.lastSpoke.set(space, this.nowSec());
     return sent;
-  }
-
-  private wandering = false;
-  private queuedEvents: string[] = [];
-
-  /**
-   * 自由时间:没有人在说话,让 Agent 自己决定做点什么。
-   * event 不为空时表示由某个事件唤醒(例如自己提交的 OpenCode 任务完成)。返回模型最后说的话(通常是它做了什么的小结)。
-   */
-  async wander(event?: string): Promise<string> {
-    if (this.wandering) {
-      // 正在处理别的事:有事件的排队,定时唤醒直接放弃
-      if (event) this.queuedEvents.push(event);
-      return "";
-    }
-    this.wandering = true;
-    try {
-      const cfg = this.d.cfg();
-      const db = this.d.db;
-      const now = new Date(this.d.now?.() ?? Date.now());
-      const system = buildSystemPrompt({
-        persona: cfg.persona,
-        space: "self",
-        spaceTitle: "自由时间",
-        isGroup: false,
-        summary: "",
-        admins: cfg.admins,
-        scene: "当前场景:自由时间。现在没有人在跟你说话,你可以按自己的性格和心情决定做什么,也可以什么都不做。",
-        memories: db.memoriesFor(["global"]).slice(-40),
-        otherSummaries: db.otherSpaceSummaries("self"),
-        extraSections: [...(this.d.extraSections?.() ?? []), ...(this.d.media?.promptSection ? [this.d.media.promptSection()] : []), AUTONOMY_SECTION],
-        now,
-      });
-      const chats = db.listSpaces().map((sp) => {
-        const row = db.getSpace(sp);
-        const last = db.recent(sp, 1)[0];
-        return `- ${sp}「${row.title || sp}」${last ? `,最后一条 ${formatTime(last.ts)} ${last.role === "self" ? "你" : last.senderName}: ${last.text.slice(0, 30)}` : ""}`;
-      });
-      const body = event
-        ? `刚刚发生了一件事:\n${event}\n\n你可以据此做点什么(比如处理请求、通知相关的人、继续后续工作),也可以只是记下来。`
-        : [
-            `现在是 ${now.toLocaleString("zh-CN", { hour12: false })}。这是你的自由时间。`,
-            "你的聊天:",
-            ...(chats.length ? chats : ["- (还没有任何聊天)"]),
-            "可以做的事(不是任务清单,看心情,也可以什么都不做,那就只输出 <silent/>):发一条动态、改签名/状态/头像、主动找某个人或某个群说句话、整理图库、跟进之前记下的事、看看 OpenCode 任务进展。",
-            "先用 recall 看看自己最近做过什么,别重复。",
-          ].join("\n");
-      const history = flattenHistory(db.turns<ChatMessage>("self").slice(-10), this.rejectHistoryReasoning ? 0 : cfg.llm.reasoningRounds);
-      const user: ChatMessage = { role: "user", content: body };
-      const turn: ChatMessage[] = [];
-      const messages: ChatMessage[] = [{ role: "system", content: system }, ...history, user];
-      const text = await this.runLoop(messages, turn, history.length + 1, { space: "self", triggerSenderIds: [] });
-      db.addTurn("self", 0, 0, [user, ...turn]);
-      db.trimTurns("self", 30);
-      return text.replace(/<\/?silent\s*\/?>/g, "").trim();
-    } finally {
-      this.wandering = false;
-      const next = this.queuedEvents.shift();
-      if (next) void this.wander(next).catch((e) => this.log(`wander failed: ${e}`));
-    }
-  }
-
-  private async callModel(messages: ChatMessage[], historyEnd: number): Promise<ChatMessage> {
-    const cfg = this.d.cfg();
-    const opts = { model: cfg.llm.model, thinking: cfg.llm.thinking, tools: this.d.tools.defs };
-    try {
-      return (await this.d.llm.chat({ ...opts, messages })).message;
-    } catch (e) {
-      if (!(e instanceof LlmError) || e.status !== 400 || !/reasoning/i.test(e.body ?? "")) throw e;
-      // 接口不接受回传的思考内容:先只去掉历史部分,仍不行再全部去掉
-      if (!this.rejectHistoryReasoning) {
-        this.rejectHistoryReasoning = true;
-        this.log("API rejected reasoning_content in history; stopping history passback");
-        const stripped = [...stripAllReasoning(messages.slice(0, historyEnd)), ...messages.slice(historyEnd)];
-        try {
-          return (await this.d.llm.chat({ ...opts, messages: stripped })).message;
-        } catch (e2) {
-          if (!(e2 instanceof LlmError) || e2.status !== 400 || !/reasoning/i.test(e2.body ?? "")) throw e2;
-        }
-      }
-      return (await this.d.llm.chat({ ...opts, messages: stripAllReasoning(messages) })).message;
-    }
   }
 
   private async sendAll(space: string, out: OutMessage[]): Promise<number> {
@@ -434,6 +407,31 @@ export class Agent {
       }
     }
     return sent;
+  }
+
+  // ───────────── 整理 ─────────────
+
+  /** 每件事处理完之后:近期消息涨满就整理摘要,长期记忆太长就合并 */
+  private async maintain() {
+    const cfg = this.d.cfg();
+    const db = this.d.db;
+    for (const space of db.listSpaces()) {
+      if (db.includedCount(space) < cfg.memory.maxMessages) continue;
+      try {
+        await compactSpace(db, this.d.llm, cfg.llm.lightModel, space, cfg.memory.maxMessages, cfg.memory.compactMessages);
+      } catch (e) {
+        this.log(`summarize failed for ${space}: ${e}`);
+      }
+    }
+    // 整理失败后隔一阵再试,不要每件事都重试
+    if (db.memoryChars() > cfg.memory.maxMemoryChars && Date.now() - this.lastConsolidateFail > 30 * 60_000) {
+      try {
+        if (!(await consolidateMemories(db, this.d.llm, cfg.llm.lightModel, cfg.memory.maxMemoryChars))) this.lastConsolidateFail = Date.now();
+      } catch (e) {
+        this.lastConsolidateFail = Date.now();
+        this.log(`memory consolidation failed: ${e}`);
+      }
+    }
   }
 }
 

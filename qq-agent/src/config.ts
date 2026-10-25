@@ -22,8 +22,6 @@ export interface Config {
       /** 思考强度,原样透传给接口 */
       effort: "low" | "medium" | "high";
     };
-    /** 只回传最近 N 轮的思考内容 */
-    reasoningRounds: number;
     /** 额外合并进请求体的字段,用于适配接口参数的变化 */
     extraBody: Record<string, unknown>;
   };
@@ -35,8 +33,12 @@ export interface Config {
     maxTypingMs: number;
   };
   memory: {
-    /** 每个空间保留的原始消息条数,更早的做摘要 */
-    windowSize: number;
+    /** 一个会话的近期消息涨到这个数就整理一次 */
+    maxMessages: number;
+    /** 每次整理最老的多少条(整理后近期消息在 maxMessages - compactMessages 到 maxMessages 之间) */
+    compactMessages: number;
+    /** 长期记忆超过这个字数就让模型整理合并 */
+    maxMemoryChars: number;
   };
   group: {
     /** 被 @ 或被回复时必回 */
@@ -87,13 +89,12 @@ export const defaultConfig: Config = {
     model: "deepseek-flash",
     lightModel: "deepseek-flash",
     thinking: { enabled: true, effort: "medium" },
-    reasoningRounds: 20,
     extraBody: {},
   },
   persona:
     "你是一个 QQ 账号背后的助理,说话自然、简短,像普通网友一样聊天,不要自称 AI 助手,不要长篇大论。熟人之间可以随意,遇到正事就认真处理。",
   behavior: { typingMsPerChar: 60, maxTypingMs: 3000 },
-  memory: { windowSize: 200 },
+  memory: { maxMessages: 200, compactMessages: 100, maxMemoryChars: 4500 },
   group: { alwaysReplyWhenMentioned: true, cooldownSeconds: 20, judgeContext: 20 },
   admins: [],
   requests: { mode: "agent" },

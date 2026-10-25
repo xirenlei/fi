@@ -4,9 +4,9 @@ import { parseJudge } from "../src/agent/judge";
 import { parseOutput } from "../src/agent/output";
 import { ToolRegistry, memoryTools } from "../src/agent/tools";
 import { defaultConfig, mergeConfig, type Config } from "../src/config";
-import { LlmClient, flattenHistory, type ChatMessage } from "../src/llm/client";
+import { LlmClient, type ChatMessage } from "../src/llm/client";
 import { Db } from "../src/memory/db";
-import { maybeSummarize } from "../src/memory/summarize";
+import { compactSpace } from "../src/memory/summarize";
 import { seg } from "../src/napcat/parse";
 import type { OneBotEvent, Segment, SpaceId } from "../src/napcat/types";
 
@@ -19,19 +19,27 @@ type Script = (body: any, n: number) => { message: ChatMessage; status?: number 
 
 function mockLlm(script: Script) {
   const calls: any[] = [];
+  const stats = { active: 0, maxConcurrent: 0 };
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
-      const body = await req.json();
-      calls.push(body);
-      const r: any = script(body, calls.length);
-      if (r.error) return new Response(r.error, { status: r.status });
-      return Response.json({ choices: [{ message: r.message, finish_reason: "stop" }] });
+      stats.active++;
+      stats.maxConcurrent = Math.max(stats.maxConcurrent, stats.active);
+      try {
+        const body = await req.json();
+        calls.push(body);
+        const r: any = script(body, calls.length);
+        if (r.delay) await Bun.sleep(r.delay);
+        if (r.error) return new Response(r.error, { status: r.status });
+        return Response.json({ choices: [{ message: r.message, finish_reason: "stop" }] });
+      } finally {
+        stats.active--;
+      }
     },
   });
   cleanups.push(() => server.stop(true));
   const llm = new LlmClient(() => ({ baseUrl: `http://127.0.0.1:${server.port}`, apiKey: "k", retries: 0 }));
-  return { llm, calls };
+  return { llm, calls, stats };
 }
 
 function fakeNapcat() {
@@ -54,7 +62,7 @@ function fakeNapcat() {
 const text = (m: ChatMessage) => (typeof m.content === "string" ? m.content : "");
 
 function setup(script: Script, cfgPatch: Partial<Config> = {}) {
-  const { llm, calls } = mockLlm(script);
+  const { llm, calls, stats } = mockLlm(script);
   const db = new Db(":memory:");
   const napcat = fakeNapcat();
   const cfg = mergeConfig(defaultConfig, { behavior: { typingMsPerChar: 0 }, ...cfgPatch });
@@ -67,7 +75,7 @@ function setup(script: Script, cfgPatch: Partial<Config> = {}) {
     sleep: async () => {},
     log: () => {},
   });
-  return { agent, db, napcat, calls };
+  return { agent, db, napcat, calls, stats };
 }
 
 let mid = 0;
@@ -100,18 +108,6 @@ describe("output parsing", () => {
     expect(parseJudge('{"reply": true}')).toBe(true);
     expect(parseJudge('{"reply":false}')).toBe(false);
     expect(parseJudge("乱七八糟")).toBe(false);
-  });
-});
-
-describe("flattenHistory", () => {
-  test("只保留最近 N 轮的思考内容", () => {
-    const rounds: ChatMessage[][] = [1, 2, 3].map((i) => [
-      { role: "user", content: `u${i}` },
-      { role: "assistant", content: `a${i}`, reasoning_content: `r${i}` },
-    ]);
-    const flat = flattenHistory(rounds, 2);
-    expect(flat.filter((m) => "reasoning_content" in m).map((m) => m.reasoning_content)).toEqual(["r2", "r3"]);
-    expect(flat).toHaveLength(6);
   });
 });
 
@@ -173,59 +169,98 @@ describe("Agent", () => {
     expect(second.at(-1).role).toBe("tool");
   });
 
-  test("跨空间记忆:群里记下的事,私聊提示词里能看到", async () => {
+  test("所有记忆都在上下文里,不管记在谁名下", async () => {
     const { agent, db, calls } = setup(() => reply("<msg>ok</msg>"));
     db.addMemory("user:7", "7 是后端工程师");
+    db.addMemory("user:8", "8 喜欢爬山");
+    db.addMemory("space:g:5", "这个群周五聚餐");
     await agent.handleEvent(privateMsg(7, "你好"));
     await agent.idle();
-    expect(text(calls[0].messages[0])).toContain("7 是后端工程师");
+    const ctx = text(calls[0].messages.at(-1));
+    expect(ctx).toContain("7 是后端工程师");
+    expect(ctx).toContain("8 喜欢爬山");
+    expect(ctx).toContain("这个群周五聚餐");
+    // 系统提示词里没有会变的东西(时间、记忆),这样每次请求开头都一样
+    expect(text(calls[0].messages[0])).not.toContain("7 是后端工程师");
+    expect(text(calls[0].messages[0])).not.toMatch(/现在是 \d{4}/);
   });
 
-  test("历史轮次被保留,并只回传最近 N 轮思考内容", async () => {
-    const { agent, calls } = setup((_b, n) => reply(`<msg>回${n}</msg>`, { reasoning_content: `想${n}` }), {
-      llm: { reasoningRounds: 1 } as any,
-    });
-    for (const t of ["一", "二", "三"]) {
+  test("第二次请求能看到第一次的聊天和自己的回复,但没有任何思考内容", async () => {
+    const { agent, calls } = setup((_b, n) => reply(`<msg>回${n}</msg>`, { reasoning_content: `想${n}` }));
+    for (const t of ["一", "二"]) {
       await agent.handleEvent(privateMsg(7, t));
       await agent.idle();
     }
-    const last = calls[2].messages;
-    expect(last.filter((m: any) => m.role === "user")).toHaveLength(3);
-    const withReasoning = last.filter((m: any) => m.reasoning_content).map((m: any) => m.reasoning_content);
-    expect(withReasoning).toEqual(["想2"]);
+    const second = calls[1].messages;
+    expect(second).toHaveLength(2); // 系统提示词 + 一整块上下文
+    const ctx = text(second.at(-1));
+    expect(ctx).toContain("u7(7): 一");
+    expect(ctx).toContain("我: 回1");
+    expect(ctx).toContain("u7(7): 二"); // 新消息在「现在」里,带 #消息ID
+    expect(second.some((m: any) => m.reasoning_content)).toBe(false);
   });
 
-  test("接口拒绝历史思考内容时自动降级重试", async () => {
-    let first = true;
+  test("接口拒绝回传思考内容时,自动去掉后重试,并且之后都不再带", async () => {
+    let calls = 0;
     const { agent, napcat } = setup((body) => {
-      const hasReasoning = body.messages.some((m: any) => m.reasoning_content);
-      if (hasReasoning) return { status: 400, error: "reasoning_content must not be passed" };
-      first = false;
-      return reply("<msg>好</msg>", { reasoning_content: "想" });
+      calls++;
+      if (body.messages.some((m: any) => m.reasoning_content)) return { status: 400, error: "reasoning_content must not be passed" };
+      if (calls === 1) return reply("", { reasoning_content: "想", tool_calls: [{ id: "c1", type: "function", function: { name: "recall", arguments: '{"query":"x"}' } }] });
+      return reply("<msg>好</msg>");
     });
     await agent.handleEvent(privateMsg(7, "一"));
     await agent.idle();
-    await agent.handleEvent(privateMsg(7, "二"));
+    expect(napcat.sent).toHaveLength(1);
+  });
+
+  test("全局排队:一次只处理一件事,先来后到", async () => {
+    const order: string[] = [];
+    const { agent, napcat, stats } = setup((body) => {
+      // 所有会话的内容都在上下文里,所以看「现在要处理的是哪个会话」
+      const ctx = JSON.stringify(body.messages.at(-1));
+      order.push(ctx.includes("现在要处理的是 私聊「u11」") ? "甲" : "乙");
+      return { ...reply("<msg>ok</msg>"), delay: 60 } as any;
+    });
+    await agent.handleEvent(privateMsg(11, "来自私聊甲"));
+    await agent.handleEvent(privateMsg(12, "来自私聊乙")); // 甲还在处理,乙排队
     await agent.idle();
-    expect(first).toBe(false);
-    expect(napcat.sent).toHaveLength(2);
+    expect(stats.maxConcurrent).toBe(1);
+    expect(order).toEqual(["甲", "乙"]);
+    expect(napcat.sent.map((s) => s.space)).toEqual(["p:11", "p:12"]);
+  });
+
+  test("处理甲的时候乙来的新消息,乙的上下文里能看到甲的聊天", async () => {
+    const { agent, calls } = setup(() => reply("<msg>ok</msg>"));
+    await agent.handleEvent(privateMsg(11, "甲说了一句悄悄话"));
+    await agent.idle();
+    await agent.handleEvent(privateMsg(12, "乙来问问"));
+    await agent.idle();
+    const ctx = text(calls[1].messages.at(-1));
+    expect(ctx).toContain("甲说了一句悄悄话"); // 其他会话的内容也在上下文里
+    // 当前处理的乙排在最后
+    expect(ctx.indexOf("p:11")).toBeLessThan(ctx.indexOf("p:12"));
+    expect(ctx).toMatch(/现在要处理的是 私聊「u12」 p:12/);
   });
 });
 
 describe("summarize", () => {
-  test("超出窗口的旧消息被整合进摘要并清理旧轮次", async () => {
+  test("近期消息涨满后,最老的一批整合进摘要,之后保持在区间内", async () => {
     const { llm, calls } = mockLlm(() => reply("摘要:7 喜欢猫"));
     const db = new Db(":memory:");
-    for (let i = 1; i <= 130; i++) db.addMessage({ space: "p:7", msgId: i, ts: i, senderId: 7, senderName: "u7", role: "user", text: `m${i}` });
-    db.addTurn("p:7", 1, 40, [{ role: "user", content: "old" }]);
-    db.addTurn("p:7", 41, 130, [{ role: "user", content: "new" }]);
-    const did = await maybeSummarize(db, llm, "m", "p:7", 50);
-    expect(did).toBe(true);
+    for (let i = 1; i <= 130; i++) {
+      db.addMessage({ space: "p:7", msgId: i, ts: 1700000000 + i, senderId: 7, senderName: "u7", role: "user", text: `m${i}` });
+    }
+    db.markIncluded(db.unseen("p:7").map((m) => m.id));
+    expect(db.includedCount("p:7")).toBe(130);
+    expect(await compactSpace(db, llm, "m", "p:7", 150, 100)).toBe(false); // 还没涨满,不整理
+    expect(await compactSpace(db, llm, "m", "p:7", 120, 100)).toBe(true);
     expect(db.getSpace("p:7").summary).toContain("喜欢猫");
-    expect(db.turns("p:7")).toHaveLength(1);
+    expect(db.includedCount("p:7")).toBe(30);
+    expect(db.included("p:7")[0]!.text).toBe("m101");
     expect(JSON.stringify(calls[0].messages)).toContain("m1");
-    expect(JSON.stringify(calls[0].messages)).not.toContain("m100");
-    // 再调用一次不会重复摘要
-    expect(await maybeSummarize(db, llm, "m", "p:7", 50)).toBe(false);
+    expect(JSON.stringify(calls[0].messages)).toContain("m100");
+    expect(JSON.stringify(calls[0].messages)).not.toContain("m101");
+    // 整理之后不够数了,再调用不会重复整理
+    expect(await compactSpace(db, llm, "m", "p:7", 120, 100)).toBe(false);
   });
 });

@@ -4,6 +4,8 @@ import { dirname } from "node:path";
 
 export interface StoredMessage {
   id: number;
+  /** 进入上下文的序号,0 表示还没进入(没被模型处理过) */
+  inc?: number;
   space: string;
   msgId: number | null;
   ts: number;
@@ -73,6 +75,8 @@ export interface SpaceRow {
   summary: string;
   summarizedUpto: number;
   llmCursor: number;
+  /** 摘要已经覆盖到的 inc */
+  summarizedInc: number;
 }
 
 export interface Memory {
@@ -87,7 +91,14 @@ export interface Memory {
  * 数据库结构升级:MIGRATIONS[i] 把库从版本 BASE_VERSION+i 升到 BASE_VERSION+i+1。
  * 以后要改表结构(加列等),只往这个数组末尾追加一条 SQL,更新时会自动执行,旧数据不丢。
  */
-export const MIGRATIONS: string[] = [];
+export const MIGRATIONS: string[] = [
+  // v1 -> v2:消息按「进入上下文的先后」排序(inc),0 表示还没进入上下文;整理摘要的位置也改用 inc 记录
+  `ALTER TABLE messages ADD COLUMN inc INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE spaces ADD COLUMN summarized_inc INTEGER NOT NULL DEFAULT 0;
+   UPDATE messages SET inc = id WHERE role = 'self' OR id <= COALESCE((SELECT llm_cursor FROM spaces WHERE spaces.space = messages.space), 0);
+   UPDATE spaces SET summarized_inc = summarized_upto;
+   CREATE INDEX IF NOT EXISTS idx_messages_inc ON messages(space, inc);`,
+];
 const BASE_VERSION = 1;
 
 export function runMigrations(raw: Database, migrations: string[] = MIGRATIONS, base = BASE_VERSION): number {
@@ -118,8 +129,9 @@ export class Db {
   addMessage(m: NewMessage): boolean {
     const r = this.raw
       .query(
-        `INSERT OR IGNORE INTO messages (space, msg_id, ts, sender_id, sender_name, role, text)
-         VALUES ($space, $msgId, $ts, $senderId, $senderName, $role, $text)`,
+        `INSERT OR IGNORE INTO messages (space, msg_id, ts, sender_id, sender_name, role, text, inc)
+         VALUES ($space, $msgId, $ts, $senderId, $senderName, $role, $text,
+                 CASE WHEN $role = 'self' THEN (SELECT COALESCE(MAX(inc), 0) + 1 FROM messages) ELSE 0 END)`,
       )
       .run({
         $space: m.space,
@@ -131,6 +143,73 @@ export class Db {
         $text: m.text,
       });
     return r.changes > 0;
+  }
+
+  /** 还没被模型处理过的他人消息(含系统通知),按到达顺序 */
+  unseen(space: string, limit = 500): StoredMessage[] {
+    const rows = this.raw
+      .query(
+        `SELECT id, inc, space, msg_id AS msgId, ts, sender_id AS senderId, sender_name AS senderName, role, text
+         FROM messages WHERE space = $space AND inc = 0 AND role = 'user' ORDER BY id DESC LIMIT $limit`,
+      )
+      .all({ $space: space, $limit: limit }) as StoredMessage[];
+    return rows.reverse();
+  }
+
+  unseenCount(space: string): number {
+    const r = this.raw.query("SELECT COUNT(*) AS n FROM messages WHERE space = $space AND inc = 0 AND role = 'user'").get({ $space: space }) as { n: number };
+    return r.n;
+  }
+
+  /** 把这些消息并入上下文(按 id 顺序依次分配 inc);已经并入的会被跳过 */
+  markIncluded(ids: number[]) {
+    const stmt = this.raw.query("UPDATE messages SET inc = (SELECT COALESCE(MAX(inc), 0) + 1 FROM messages) WHERE id = $id AND inc = 0");
+    for (const id of [...ids].sort((a, b) => a - b)) stmt.run({ $id: id });
+  }
+
+  /** 已并入上下文、且还没被摘要覆盖的消息,按并入顺序 */
+  included(space: string): StoredMessage[] {
+    return this.raw
+      .query(
+        `SELECT m.id, m.inc, m.space, m.msg_id AS msgId, m.ts, m.sender_id AS senderId, m.sender_name AS senderName, m.role, m.text
+         FROM messages m LEFT JOIN spaces s ON s.space = m.space
+         WHERE m.space = $space AND m.inc > 0 AND m.inc > COALESCE(s.summarized_inc, 0) ORDER BY m.inc`,
+      )
+      .all({ $space: space }) as StoredMessage[];
+  }
+
+  includedCount(space: string): number {
+    const r = this.raw
+      .query(
+        `SELECT COUNT(*) AS n FROM messages m LEFT JOIN spaces s ON s.space = m.space
+         WHERE m.space = $space AND m.inc > 0 AND m.inc > COALESCE(s.summarized_inc, 0)`,
+      )
+      .get({ $space: space }) as { n: number };
+    return r.n;
+  }
+
+  /** 用于排序会话块:该会话最近一条已并入消息的 inc,没有则为 0 */
+  lastInc(space: string): number {
+    const r = this.raw.query("SELECT COALESCE(MAX(inc), 0) AS n FROM messages WHERE space = $space").get({ $space: space }) as { n: number };
+    return r.n;
+  }
+
+  /** 有内容要放进上下文的会话:有已并入的消息,或有摘要 */
+  contextSpaces(): SpaceRow[] {
+    return this.raw
+      .query(
+        `SELECT s.space, s.title, s.summary, s.summarized_upto AS summarizedUpto, s.llm_cursor AS llmCursor, s.summarized_inc AS summarizedInc
+         FROM spaces s
+         WHERE s.summary != '' OR EXISTS (SELECT 1 FROM messages m WHERE m.space = s.space AND m.inc > s.summarized_inc)
+         ORDER BY s.space`,
+      )
+      .all() as SpaceRow[];
+  }
+
+  /** 摘要覆盖到某个 inc 之前的内容 */
+  setSummaryInc(space: string, summary: string, uptoInc: number) {
+    this.getSpace(space);
+    this.raw.query("UPDATE spaces SET summary = $summary, summarized_inc = $upto WHERE space = $space").run({ $space: space, $summary: summary, $upto: uptoInc });
   }
 
   /** 最近 limit 条消息,按时间正序 */
@@ -157,7 +236,7 @@ export class Db {
     this.raw.query("INSERT OR IGNORE INTO spaces (space) VALUES ($space)").run({ $space: space });
     return this.raw
       .query(
-        "SELECT space, title, summary, summarized_upto AS summarizedUpto, llm_cursor AS llmCursor FROM spaces WHERE space = $space",
+        "SELECT space, title, summary, summarized_upto AS summarizedUpto, llm_cursor AS llmCursor, summarized_inc AS summarizedInc FROM spaces WHERE space = $space",
       )
       .get({ $space: space }) as SpaceRow;
   }
@@ -280,6 +359,22 @@ export class Db {
     return this.raw
       .query("SELECT id, subject, content, ts FROM memories WHERE content LIKE $like ESCAPE '\\' ORDER BY id DESC LIMIT $limit")
       .all({ $like: like, $limit: limit }) as Memory[];
+  }
+
+  memoryChars(): number {
+    const r = this.raw.query("SELECT COALESCE(SUM(LENGTH(content) + LENGTH(subject) + 12), 0) AS n FROM memories").get() as { n: number };
+    return r.n;
+  }
+
+  /** 整理记忆:旧的整批归档,换成整理后的新条目 */
+  replaceMemories(entries: Array<{ subject: string; content: string }>) {
+    this.raw.exec("CREATE TABLE IF NOT EXISTS memories_archive (id INTEGER, subject TEXT, content TEXT, ts INTEGER, archived INTEGER)");
+    const tx = this.raw.transaction(() => {
+      this.raw.exec(`INSERT INTO memories_archive SELECT id, subject, content, ts, ${Math.floor(Date.now() / 1000)} FROM memories`);
+      this.raw.exec("DELETE FROM memories");
+      for (const e of entries) this.addMemory(e.subject, e.content);
+    });
+    tx();
   }
 
   allMemories(): Memory[] {

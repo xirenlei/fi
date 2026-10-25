@@ -87,7 +87,6 @@ const SETTINGS = [
     ['llm.lightModel', '轻量模型', 'text', { hint: '群聊插嘴判定、图片描述、摘要' }],
     ['llm.thinking.enabled', '开启思考', 'bool'],
     ['llm.thinking.effort', '思考等级', 'select', { options: ['low', 'medium', 'high'] }],
-    ['llm.reasoningRounds', '回传思考的轮数', 'number', { hint: '只回传最近 N 轮的思考内容,更早的丢弃以省 token' }],
     ['llm.extraBody', '额外请求参数', 'json', { hint: '合并进每次请求体的 JSON,接口参数变化时用' }],
   ]],
   ['人设', [['persona', '人设提示词', 'textarea']]],
@@ -98,7 +97,11 @@ const SETTINGS = [
     ['behavior.typingMsPerChar', '打字速度(毫秒/字)', 'number', { hint: '0 表示不模拟打字延迟' }],
     ['behavior.maxTypingMs', '单条最长等待(毫秒)', 'number'],
   ]],
-  ['记忆', [['memory.windowSize', '每个会话保留的原始消息数', 'number', { hint: '更早的消息会整理成摘要' }]]],
+  ['记忆', [
+    ['memory.maxMessages', '会话近期消息上限', 'number', { hint: '一个群或私聊的近期消息涨到这个数,就把最老的一批整理成摘要' }],
+    ['memory.compactMessages', '每次整理的条数', 'number', { hint: '整理后近期消息保持在 上限-这个数 到 上限 之间,这样上下文只追加、能命中缓存' }],
+    ['memory.maxMemoryChars', '长期记忆字数上限', 'number', { hint: '超过后让模型把长期记忆整理合并(旧版本会归档备份)' }],
+  ]],
   ['管理员', [['admins', '管理员的 QQ 号', 'list', { hint: '用逗号分隔。会写进提示词,管理员的话优先听;不做硬性限制,别人的请求由它自己判断' }]]],
   ['好友与群请求', [['requests.mode', '收到好友请求/入群邀请时', 'select', { options: [['agent', '交给它自己判断(推荐)'], ['notify', '只通知管理员,由管理员决定'], ['reject', '一律拒绝']] }]]],
   ['自主行动', [

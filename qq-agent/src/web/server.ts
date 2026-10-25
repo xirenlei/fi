@@ -35,8 +35,10 @@ export function applyConfig(cfg: Config, incoming: Json): { changed: string[] } 
   }
   const merged = mergeConfig(cfg, patch) as Json;
   const next = merged as unknown as Config;
-  if (!(next.llm.reasoningRounds >= 0)) throw new Error("reasoningRounds 不能为负");
-  if (!(next.memory.windowSize >= 20)) throw new Error("windowSize 至少为 20");
+  const mem = next.memory;
+  if (!(mem.maxMessages >= 40)) throw new Error("memory.maxMessages 至少为 40");
+  if (!(mem.compactMessages >= 10 && mem.compactMessages <= mem.maxMessages - 10)) throw new Error("memory.compactMessages 要在 10 到 maxMessages-10 之间");
+  if (!(mem.maxMemoryChars >= 1000)) throw new Error("memory.maxMemoryChars 至少为 1000");
   if (!(next.web.port > 0 && next.web.port < 65536)) throw new Error("web.port 不合法");
   const changed: string[] = [];
   for (const k of Object.keys(next) as Array<keyof Config>) {

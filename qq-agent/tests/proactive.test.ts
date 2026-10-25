@@ -59,11 +59,16 @@ test("调度器:关闭或安静时段不行动,否则行动;出错不会抛出",
   expect(runs).toBe(3);
 });
 
-test("提示词里有管理员和边界;没有管理员时平等对待", () => {
-  const base = { persona: "p", space: "p:1", spaceTitle: "t", isGroup: false, summary: "", memories: [], otherSummaries: [], extraSections: [], now: new Date() };
-  expect(buildSystemPrompt({ ...base, admins: [10001, 10002] })).toContain("管理员的 QQ 号:10001、10002");
+test("系统提示词:有管理员和边界、传话的分寸,且不含会变的内容", () => {
+  const base = { persona: "p", extraSections: [] };
+  const withAdmins = buildSystemPrompt({ ...base, admins: [10001, 10002] });
+  expect(withAdmins).toContain("管理员的 QQ 号:10001、10002");
+  expect(withAdmins).toContain("不要无缘无故地把某个人说的话转述给另一个人");
+  expect(withAdmins).toContain("自主行动");
+  expect(withAdmins).not.toMatch(/现在是 \d{4}/);
   expect(buildSystemPrompt({ ...base, admins: [] })).toContain("还没有指定管理员");
-  expect(buildSystemPrompt({ ...base, admins: [], scene: "当前场景:自由时间" })).toContain("当前场景:自由时间");
+  // 同样的输入得到逐字相同的结果,才能命中前缀缓存
+  expect(buildSystemPrompt({ ...base, admins: [10001, 10002] })).toBe(withAdmins);
 });
 
 function setup(script: (body: any, n: number) => ChatMessage) {
@@ -139,7 +144,9 @@ test("自由时间:模型自己决定主动给群里发消息,并记住这次行
   // 下一次自由时间带着上次的经历,选择什么都不做
   expect(await t.agent.wander()).toBe("");
   const second = JSON.stringify(t.bodies.at(-1).messages);
-  expect(second).toContain("去群里打了个招呼");
+  // 她自己发出去的话已经进了这个群的聊天记录,下次自由时间能看到
+  expect(second).toContain("我: 大家早");
+  expect(second).toContain("我: 今天有人打球吗");
   expect(t.sent).toHaveLength(2);
 });
 

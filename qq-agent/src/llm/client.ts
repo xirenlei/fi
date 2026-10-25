@@ -109,26 +109,6 @@ export class LlmClient {
   }
 }
 
-/**
- * 整理历史消息里的思考内容:只有最近 keepRounds 轮保留 reasoning_content,更早的去掉以节省 token。
- * rounds 是按时间排序的「轮」,每轮是一组消息。
- */
-export function flattenHistory(rounds: ChatMessage[][], keepRounds: number): ChatMessage[] {
-  const out: ChatMessage[] = [];
-  const firstKept = Math.max(0, rounds.length - keepRounds);
-  rounds.forEach((round, i) => {
-    for (const m of round) {
-      if (i < firstKept && "reasoning_content" in m) {
-        const { reasoning_content: _drop, ...rest } = m;
-        out.push(rest);
-      } else {
-        out.push(m);
-      }
-    }
-  });
-  return out;
-}
-
 export function stripAllReasoning(messages: ChatMessage[]): ChatMessage[] {
   return messages.map((m) => {
     if (!("reasoning_content" in m)) return m;

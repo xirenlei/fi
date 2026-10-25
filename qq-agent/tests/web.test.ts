@@ -42,7 +42,7 @@ describe("config helpers", () => {
   test("非法值被拒绝", () => {
     const cfg = structuredClone(defaultConfig);
     expect(() => applyConfig(cfg, { admins: ["abc"] })).toThrow();
-    expect(() => applyConfig(cfg, { memory: { windowSize: 1 } })).toThrow();
+    expect(() => applyConfig(cfg, { memory: { maxMessages: 10 } })).toThrow();
   });
 });
 
