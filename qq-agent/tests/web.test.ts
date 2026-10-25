@@ -103,3 +103,43 @@ describe("web api", () => {
     expect((await fetch(base + "/api/logs/bogus")).status).toBe(404);
   });
 });
+
+describe("版本更新", () => {
+  test("读取 install.env;没有仓库时说明不支持自动更新", async () => {
+    const { readInstallEnv, checkUpdate } = await import("../src/web/server");
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(home, "install.env"), "APP_DIR='/nowhere'\nBRANCH='main'\n");
+    expect(readInstallEnv()).toEqual({ APP_DIR: "/nowhere", BRANCH: "main" });
+    const info = await checkUpdate();
+    expect(info.supported).toBe(false);
+    const api = await (await fetch(base + "/api/update/check")).json();
+    expect(api.supported).toBe(false);
+    expect(await (await fetch(base + "/api/update/log")).json()).toMatchObject({ running: false });
+  });
+
+  test("有仓库时能比较出落后几个提交,并列出提交说明", async () => {
+    const { checkUpdate } = await import("../src/web/server");
+    const { writeFileSync, mkdirSync } = await import("node:fs");
+    const sh = async (cmd: string, cwd: string) => {
+      const p = Bun.spawn(["bash", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+      await p.exited;
+    };
+    const remote = join(home, "remote.git");
+    const work = join(home, "work");
+    const app = join(home, "appdir");
+    mkdirSync(app, { recursive: true });
+    const git = "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false";
+    await sh(`git init -q --bare -b main '${remote}' && git clone -q '${remote}' '${work}'`, home);
+    await sh(`echo 1 > a && git add a && ${git} commit -qm "第一版" && git push -q origin HEAD:main`, work);
+    await sh(`git clone -q '${remote}' '${join(app, "repo")}'`, home);
+    writeFileSync(join(home, "install.env"), `APP_DIR='${app}'\nBRANCH='main'\n`);
+    const same = await checkUpdate();
+    expect(same.supported).toBe(true);
+    expect(same.behind).toBe(0);
+    expect(same.current?.subject).toBe("第一版");
+    await sh(`echo 2 > a && ${git} commit -qam "修复了一个问题" && echo 3 > a && ${git} commit -qam "新增一个功能" && git push -q origin HEAD:main`, work);
+    const behind = await checkUpdate();
+    expect(behind.behind).toBe(2);
+    expect(behind.commits?.join("\n")).toContain("新增一个功能");
+  });
+});

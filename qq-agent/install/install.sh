@@ -102,10 +102,10 @@ if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/../src/index.ts" ]; then
   echo "使用本地代码: $SRC_ROOT"
 else
   if [ -d "$APP_DIR/repo/.git" ]; then
-    git -C "$APP_DIR/repo" fetch -q origin "$BRANCH" && git -C "$APP_DIR/repo" reset -q --hard "origin/$BRANCH"
+    git -C "$APP_DIR/repo" fetch -q --depth 100 origin "$BRANCH" && git -C "$APP_DIR/repo" reset -q --hard FETCH_HEAD
   else
     rm -rf "$APP_DIR/repo"; mkdir -p "$APP_DIR"
-    git clone -q --depth 1 --branch "$BRANCH" "$REPO_URL" "$APP_DIR/repo"
+    git clone -q --depth 100 --branch "$BRANCH" "$REPO_URL" "$APP_DIR/repo"
   fi
   rm -rf "$APP_DIR/qq-agent" && cp -r "$APP_DIR/repo/qq-agent" "$APP_DIR/qq-agent"
   echo "已更新到 $(git -C "$APP_DIR/repo" rev-parse --short HEAD)"
@@ -113,16 +113,20 @@ fi
 [ -f "$APP_DIR/qq-agent/src/index.ts" ] || die "代码目录不完整: $APP_DIR/qq-agent"
 
 # ---------- 4. OpenCode ----------
-step "安装 OpenCode(最新版)"
+step "安装 OpenCode"
 OC_DIR="$APP_DIR/opencode"
 mkdir -p "$OC_DIR"
-[ -f "$OC_DIR/package.json" ] || echo '{"name":"oc","private":true}' > "$OC_DIR/package.json"
-if command -v npm >/dev/null 2>&1; then
-  npm install --prefix "$OC_DIR" --no-audit --no-fund --loglevel=error opencode-ai@latest
-else
-  (cd "$OC_DIR" && "$BUN" add opencode-ai@latest)
-fi
 OPENCODE_BIN="$OC_DIR/node_modules/.bin/opencode"
+if [ -x "$OPENCODE_BIN" ] && [ "${QQA_UPDATE_OPENCODE:-0}" != 1 ]; then
+  echo "已安装,不升级(要升级请设置 QQA_UPDATE_OPENCODE=1)"
+else
+  [ -f "$OC_DIR/package.json" ] || echo '{"name":"oc","private":true}' > "$OC_DIR/package.json"
+  if command -v npm >/dev/null 2>&1; then
+    npm install --prefix "$OC_DIR" --no-audit --no-fund --loglevel=error opencode-ai@latest
+  else
+    (cd "$OC_DIR" && "$BUN" add opencode-ai@latest)
+  fi
+fi
 [ -x "$OPENCODE_BIN" ] || die "OpenCode 安装失败"
 echo "opencode $("$OPENCODE_BIN" --version 2>/dev/null | head -1)"
 
@@ -158,7 +162,15 @@ BUN='$BUN'
 OPENCODE_BIN='$OPENCODE_BIN'
 QQ_BIN='$QQ_BIN'
 WORKDIR='$WORKDIR'
+REPO_URL='$REPO_URL'
+BRANCH='$BRANCH'
 ENV
+if [ -d "$APP_DIR/repo/.git" ]; then git -C "$APP_DIR/repo" rev-parse --short HEAD > "$APP_DIR/VERSION"; else echo local > "$APP_DIR/VERSION"; fi
+# 按已安装的 NapCat 版本重新生成接口目录,Agent 才知道它真正支持哪些接口
+NAPCAT_MJS="$HOME/Napcat/opt/QQ/resources/app/app_launcher/napcat/napcat.mjs"
+if [ -f "$NAPCAT_MJS" ]; then
+  "$BUN" run "$APP_DIR/qq-agent/scripts/gen-napcat-catalog.ts" "$NAPCAT_MJS" "$DATA_DIR/napcat-catalog.json" || warn "生成接口目录失败,将使用随程序打包的版本"
+fi
 install -m 0755 "$APP_DIR/qq-agent/install/qq-agent" "$BIN_DIR/qq-agent"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR 不在 PATH 里,新开终端后若找不到 qq-agent 命令,请把它加入 PATH" ;; esac
 
@@ -221,7 +233,7 @@ fi
 
 # ---------- 9. 启动 ----------
 step "启动服务"
-QQ_AGENT_HOME="$DATA_DIR" "$BIN_DIR/qq-agent" restart all || warn "部分服务启动失败,用 qq-agent status / qq-agent logs <服务> 查看"
+QQ_AGENT_HOME="$DATA_DIR" "$BIN_DIR/qq-agent" restart "${QQA_RESTART:-all}" || warn "部分服务启动失败,用 qq-agent status / qq-agent logs <服务> 查看"
 sleep 3
 QQ_AGENT_HOME="$DATA_DIR" "$BIN_DIR/qq-agent" status || true
 

@@ -16,6 +16,8 @@ usage() {
   start|stop|restart [napcat|opencode|agent|all]   启停服务(默认 all)
   status                                           查看各服务状态
   logs <napcat|opencode|agent>                     查看日志(Ctrl+C 退出)
+  version                                          显示当前版本
+  update [--check]                                 更新到最新版本(--check 只检查,不更新)
   open                                             打开控制台
   run <服务>                                       前台运行(供 systemd 调用)
 USAGE
@@ -87,6 +89,71 @@ targets() {
   if [ -z "${1:-}" ] || [ "$1" = all ]; then printf '%s\n' "${SERVICES[@]}"; else echo "$1"; fi
 }
 
+cfg_port() { grep -o '"port": *[0-9]*' "$DATA_DIR/config.json" 2>/dev/null | tail -1 | grep -o '[0-9]*$'; }
+
+# 把代码和数据库备份到 $APP_DIR/backup、$DATA_DIR/backups
+make_backup() {
+  local ts="$1"
+  mkdir -p "$APP_DIR/backup/$ts" "$DATA_DIR/backups"
+  cp -a "$APP_DIR/qq-agent" "$APP_DIR/backup/$ts/qq-agent"
+  git -C "$APP_DIR/repo" rev-parse HEAD > "$APP_DIR/backup/$ts/COMMIT"
+  [ -f "$DATA_DIR/config.json" ] && install -m 0600 "$DATA_DIR/config.json" "$DATA_DIR/backups/config-$ts.json"
+  if [ -f "$DATA_DIR/agent.db" ]; then
+    "$BUN" -e 'import {Database} from "bun:sqlite"; const db=new Database(process.argv[1]); db.exec(`VACUUM INTO '"'"'${process.argv[2]}'"'"'`)' "$DATA_DIR/agent.db" "$DATA_DIR/backups/agent-$ts.db" \
+      || cp "$DATA_DIR/agent.db" "$DATA_DIR/backups/agent-$ts.db"
+  fi
+  # 只保留最近 5 份备份
+  ls -1dt "$APP_DIR"/backup/*/ 2>/dev/null | tail -n +6 | xargs -r rm -rf
+  ls -1t "$DATA_DIR"/backups/agent-*.db 2>/dev/null | tail -n +6 | xargs -r rm -f
+  ls -1t "$DATA_DIR"/backups/config-*.json 2>/dev/null | tail -n +6 | xargs -r rm -f
+}
+
+do_update() {
+  local check_only=0
+  [ "${1:-}" = "--check" ] && check_only=1
+  [ -n "${APP_DIR:-}" ] && [ -d "$APP_DIR/repo/.git" ] || { echo "不是通过仓库安装的,无法自动更新。请重新运行安装命令。"; return 2; }
+  git -C "$APP_DIR/repo" fetch -q --depth 100 origin "${BRANCH:-main}" || { echo "获取更新失败(网络问题?)"; return 1; }
+  local cur new
+  cur=$(git -C "$APP_DIR/repo" rev-parse HEAD); new=$(git -C "$APP_DIR/repo" rev-parse FETCH_HEAD)
+  if [ "$cur" = "$new" ]; then echo "已是最新版本($(git -C "$APP_DIR/repo" rev-parse --short HEAD))"; return 0; fi
+  echo "有新版本,将更新:"
+  git -C "$APP_DIR/repo" log --format='  %h %s' "$cur..$new" 2>/dev/null | head -30
+  [ "$check_only" = 1 ] && return 0
+
+  mkdir -p "$RUN_DIR"
+  mkdir "$RUN_DIR/update.lock" 2>/dev/null || { echo "已有更新在进行中"; return 3; }
+  trap 'rmdir "$RUN_DIR/update.lock" 2>/dev/null' RETURN
+
+  local ts; ts=$(date +%Y%m%d-%H%M%S)
+  echo "==> 备份当前版本($ts)"
+  make_backup "$ts" || { echo "备份失败,已取消更新"; return 1; }
+
+  echo "==> 更新代码并应用"
+  git -C "$APP_DIR/repo" reset -q --hard "$new"
+  if ! QQA_SKIP_DEPS=1 QQA_RESTART=agent bash "$APP_DIR/repo/qq-agent/install/install.sh"; then
+    rollback "$ts" "$cur"; return 1
+  fi
+
+  echo "==> 检查新版本是否正常启动"
+  local port ok=0 i; port=$(cfg_port)
+  for i in $(seq 1 40); do
+    if curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${port:-8765}/api/status"; then ok=1; break; fi
+    sleep 1
+  done
+  if [ "$ok" != 1 ]; then echo "新版本没有正常启动。"; rollback "$ts" "$cur"; return 1; fi
+  echo "更新完成,当前版本 $(git -C "$APP_DIR/repo" rev-parse --short HEAD)"
+}
+
+rollback() {
+  local ts="$1" old="$2"
+  echo "==> 出错了,回滚到更新前的版本"
+  git -C "$APP_DIR/repo" reset -q --hard "$old"
+  rm -rf "$APP_DIR/qq-agent" && cp -a "$APP_DIR/backup/$ts/qq-agent" "$APP_DIR/qq-agent"
+  git -C "$APP_DIR/repo" rev-parse --short HEAD > "$APP_DIR/VERSION"
+  do_action restart agent
+  echo "已回滚。数据库备份在 $DATA_DIR/backups/agent-$ts.db(数据库只做向前兼容的升级,一般不需要还原)。"
+}
+
 cmd="${1:-}"
 shift || true
 case "$cmd" in
@@ -103,9 +170,12 @@ case "$cmd" in
   logs)
     [ -n "${1:-}" ] || { usage; exit 1; }
     exec tail -n 200 -f "$LOG_DIR/$1.log" ;;
+  version)
+    [ -n "${APP_DIR:-}" ] && cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown ;;
+  update)
+    do_update "${1:-}"; exit $? ;;
   open)
-    port=$(grep -o '"port": *[0-9]*' "$DATA_DIR/config.json" 2>/dev/null | tail -1 | grep -o '[0-9]*$')
-    exec xdg-open "http://127.0.0.1:${port:-8765}" ;;
+    exec xdg-open "http://127.0.0.1:$(cfg_port || echo 8765)" ;;
   run)
     [ -n "${1:-}" ] || { usage; exit 1; }
     run_service "$1" ;;

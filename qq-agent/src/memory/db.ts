@@ -83,6 +83,22 @@ export interface Memory {
   ts: number;
 }
 
+/**
+ * 数据库结构升级:MIGRATIONS[i] 把库从版本 BASE_VERSION+i 升到 BASE_VERSION+i+1。
+ * 以后要改表结构(加列等),只往这个数组末尾追加一条 SQL,更新时会自动执行,旧数据不丢。
+ */
+export const MIGRATIONS: string[] = [];
+const BASE_VERSION = 1;
+
+export function runMigrations(raw: Database, migrations: string[] = MIGRATIONS, base = BASE_VERSION): number {
+  let v = (raw.query("PRAGMA user_version").get() as { user_version: number }).user_version;
+  if (v === 0) v = base; // 全新的库,或这个机制出现之前的旧库:表结构都是基线版本
+  if (v > base + migrations.length) throw new Error(`数据库版本 ${v} 比程序支持的新,请先更新程序`);
+  for (; v - base < migrations.length; v++) raw.exec(migrations[v - base]!);
+  raw.exec(`PRAGMA user_version = ${v}`);
+  return v;
+}
+
 export class Db {
   readonly raw: Database;
 
@@ -91,6 +107,7 @@ export class Db {
     this.raw = new Database(path);
     this.raw.exec("PRAGMA journal_mode = WAL;");
     this.raw.exec(SCHEMA);
+    runMigrations(this.raw);
   }
 
   close() {

@@ -58,7 +58,7 @@ export function buildSystemPrompt(i: PromptInput): string {
       "你的回复会被拆成多条 QQ 消息发出去,每条用 <msg></msg> 包裹,例如:",
       "<msg>第一句</msg><msg>第二句</msg>",
       "- 想一次说几条由你决定,像真人聊天那样分成几条短消息,不要写成长段落。",
-      '- 在消息里可以用 <at id="QQ号"/> 提及某人,<reply id="消息ID"/> 回复某条消息(放在该条 <msg> 的开头)。',
+      '- 在消息里可以用 <at id="QQ号"/> 提及某人,<reply id="消息ID"/> 回复某条消息(放在该条 <msg> 的开头),<face id="编号"/> 发 QQ 自带的小黄脸表情(如 76 赞、66 爱心、14 微笑)。',
       "- 不想回复时只输出 <silent/>,什么都不要多说。",
       "- 不要输出 markdown 标记,QQ 里显示不出来。",
     ].join("\n"),

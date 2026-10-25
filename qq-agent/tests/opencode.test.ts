@@ -14,6 +14,12 @@ import { openCodeTools } from "../src/opencode/tools";
 import { runShell, systemTools } from "../src/tools/system";
 import type { Segment, SpaceId } from "../src/napcat/types";
 
+/** 轮询等待条件成立,避免固定 sleep 在机器繁忙时不稳定 */
+async function waitFor(cond: () => boolean, ms = 5000) {
+  const until = Date.now() + ms;
+  while (!cond() && Date.now() < until) await Bun.sleep(10);
+}
+
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const c of cleanups.splice(0)) c();
@@ -114,7 +120,7 @@ describe("OpenCodeManager", () => {
     const done: TaskDone[] = [];
     mgr.onDone = (d) => void done.push(d);
     const task = await mgr.submit("p:1", "写个脚本");
-    await Bun.sleep(300);
+    await waitFor(() => done.length > 0);
     expect(done).toHaveLength(1);
     expect(done[0]!.status).toBe("done");
     expect(done[0]!.result).toBe("完成:写个脚本");
@@ -128,7 +134,7 @@ describe("OpenCodeManager", () => {
     const done: TaskDone[] = [];
     mgr.onDone = (d) => void done.push(d);
     await mgr.submit("p:1", "x");
-    await Bun.sleep(300);
+    await waitFor(() => done.length > 0);
     expect(done[0]!.status).toBe("error");
     expect(done[0]!.result).toContain("没有可用的模型");
   });
@@ -152,6 +158,7 @@ describe("OpenCodeManager", () => {
     await mgr.client.promptAsync(task.sessionId, "补查");
     await Bun.sleep(100);
     await mgr.reconcile();
+    await waitFor(() => done.length > 0);
     expect(done).toHaveLength(1);
     expect(done[0]!.result).toBe("完成:补查");
   });
@@ -214,7 +221,7 @@ describe("任务完成后由 Agent 汇报", () => {
     });
     mgr.onDone = (d) => agent.notify(d.task.space, `[OpenCode 任务 #${d.task.id} 已完成]\n${d.result}`);
     await mgr.submit("g:9", "写脚本");
-    await Bun.sleep(300);
+    await waitFor(() => llmBodies.length > 0);
     await agent.idle();
     expect(JSON.stringify(llmBodies.at(-1).messages)).toContain("完成:写脚本");
     expect(sent.map((s) => s.space)).toEqual(["g:9", "g:9"]);

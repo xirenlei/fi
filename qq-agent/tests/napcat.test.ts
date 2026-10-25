@@ -107,7 +107,7 @@ describe("NapcatClient", () => {
       time: 1,
       message: [seg.text("嗨")],
     });
-    await Bun.sleep(50);
+    for (let i = 0; i < 200 && events.length < 1; i++) await Bun.sleep(10);
     expect(events).toHaveLength(1);
     expect(events[0]!.user_id).toBe(7);
   });

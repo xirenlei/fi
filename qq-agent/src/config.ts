@@ -48,6 +48,10 @@ export interface Config {
   };
   /** 管理员的 QQ 号,写进提示词:管理员的话优先听。不做硬性的权限限制,由模型自己判断 */
   admins: number[];
+  /** 好友请求、入群邀请的处理方式:agent 交给它自己判断,notify 只通知管理员,reject 一律拒绝 */
+  requests: {
+    mode: "agent" | "notify" | "reject";
+  };
   /** 自主行动:没人说话时,隔一段时间让它自己决定做点什么(发动态、改签名、主动找人聊天等) */
   proactive: {
     enabled: boolean;
@@ -92,6 +96,7 @@ export const defaultConfig: Config = {
   memory: { windowSize: 200 },
   group: { alwaysReplyWhenMentioned: true, cooldownSeconds: 20, judgeContext: 20 },
   admins: [],
+  requests: { mode: "agent" },
   proactive: { enabled: true, intervalMinutes: 120, quietStartHour: 1, quietEndHour: 8 },
   opencode: {
     workdir: "",

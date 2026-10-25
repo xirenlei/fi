@@ -5,6 +5,7 @@ import { maybeSummarize } from "../memory/summarize";
 import { isMessageEvent } from "../napcat/client";
 import { displayName, parseMessage, seg, type ParsedMessage } from "../napcat/parse";
 import { parseSpace, spaceOf, type OneBotEvent, type Segment, type SpaceId } from "../napcat/types";
+import { interpretEvent, requestGuidance } from "./events";
 import { judgeReply } from "./judge";
 import { parseOutput, plainLength, type OutMessage, type OutPart } from "./output";
 import { buildSystemPrompt, formatNewMessages, formatTime } from "./prompt";
@@ -89,7 +90,7 @@ export class Agent {
   }
 
   async handleEvent(ev: OneBotEvent): Promise<void> {
-    if (!isMessageEvent(ev)) return;
+    if (!isMessageEvent(ev)) return this.handleOtherEvent(ev);
     const selfId = this.d.napcat.selfId ?? ev.self_id;
     const space = spaceOf(ev);
     const parsed = parseMessage({ message: ev.message, self_id: selfId });
@@ -124,6 +125,26 @@ export class Agent {
       mentioned = this.d.db.findByMsgId(space, parsed.replyToId)?.role === "self";
     }
     this.trigger(space, mentioned, false);
+  }
+
+  /** 好友请求、入群邀请、被戳、有人进退群等非聊天事件 */
+  private async handleOtherEvent(ev: OneBotEvent): Promise<void> {
+    const cfg = this.d.cfg();
+    const act = interpretEvent(ev, this.d.napcat.selfId ?? ev.self_id, cfg.admins);
+    if (!act) return;
+    if (act.type === "request") {
+      if (cfg.requests.mode === "reject") {
+        const r = act.reject();
+        await this.d.napcat.call(r.action, r.params).catch((e) => this.log(`reject request failed: ${e}`));
+        return;
+      }
+      void this.wander(`${act.text}\n${requestGuidance(cfg.requests.mode, act.fromAdmin)}`).catch((e) => this.log(`wander failed: ${e}`));
+    } else if (act.type === "wander") {
+      void this.wander(act.text).catch((e) => this.log(`wander failed: ${e}`));
+    } else {
+      this.d.db.addMessage({ space: act.space, msgId: null, ts: this.nowSec(), senderId: act.senderId, senderName: "系统", role: "user", text: act.text });
+      if (act.trigger !== "none") this.trigger(act.space, act.trigger === "mention", false);
+    }
   }
 
   /** 系统事件(例如 OpenCode 任务完成):写入一条系统消息并让模型处理,由模型决定怎么向用户汇报 */
@@ -285,13 +306,18 @@ export class Agent {
   }
 
   private wandering = false;
+  private queuedEvents: string[] = [];
 
   /**
    * 自由时间:没有人在说话,让 Agent 自己决定做点什么。
    * event 不为空时表示由某个事件唤醒(例如自己提交的 OpenCode 任务完成)。返回模型最后说的话(通常是它做了什么的小结)。
    */
   async wander(event?: string): Promise<string> {
-    if (this.wandering) return "";
+    if (this.wandering) {
+      // 正在处理别的事:有事件的排队,定时唤醒直接放弃
+      if (event) this.queuedEvents.push(event);
+      return "";
+    }
     this.wandering = true;
     try {
       const cfg = this.d.cfg();
@@ -316,7 +342,7 @@ export class Agent {
         return `- ${sp}「${row.title || sp}」${last ? `,最后一条 ${formatTime(last.ts)} ${last.role === "self" ? "你" : last.senderName}: ${last.text.slice(0, 30)}` : ""}`;
       });
       const body = event
-        ? `刚刚发生了一件事:\n${event}\n\n你可以据此做点什么(比如通知相关的人、继续后续工作),也可以只是记下来。`
+        ? `刚刚发生了一件事:\n${event}\n\n你可以据此做点什么(比如处理请求、通知相关的人、继续后续工作),也可以只是记下来。`
         : [
             `现在是 ${now.toLocaleString("zh-CN", { hour12: false })}。这是你的自由时间。`,
             "你的聊天:",
@@ -334,6 +360,8 @@ export class Agent {
       return text.replace(/<\/?silent\s*\/?>/g, "").trim();
     } finally {
       this.wandering = false;
+      const next = this.queuedEvents.shift();
+      if (next) void this.wander(next).catch((e) => this.log(`wander failed: ${e}`));
     }
   }
 
@@ -375,6 +403,9 @@ export class Agent {
         } else if (part.type === "at") {
           segs.push(seg.at(part.id));
           labels.push(`@${part.id}`);
+        } else if (part.type === "face") {
+          segs.push(seg.face(part.id));
+          labels.push(`[QQ表情:${part.id}]`);
         } else if (part.type === "reply") {
           segs.unshift(seg.reply(part.id));
         } else if (this.d.media) {

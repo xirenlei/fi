@@ -3,6 +3,7 @@ export type OutPart =
   | { type: "text"; text: string }
   | { type: "at"; id: string }
   | { type: "reply"; id: string }
+  | { type: "face"; id: string }
   | { type: "media"; kind: "sticker" | "image" | "video"; ref: string };
 
 export interface OutMessage {
@@ -10,7 +11,7 @@ export interface OutMessage {
 }
 
 const MSG_RE = /<msg>([\s\S]*?)<\/msg>/g;
-const TAG_RE = /<(at|reply|sticker|image|video)\s+(?:id|ref)\s*=\s*"([^"]*)"\s*\/?>/g;
+const TAG_RE = /<(at|reply|face|sticker|image|video)\s+(?:id|ref)\s*=\s*"([^"]*)"\s*\/?>/g;
 
 function parseParts(body: string): OutPart[] {
   const parts: OutPart[] = [];
@@ -19,7 +20,7 @@ function parseParts(body: string): OutPart[] {
     const idx = m.index ?? 0;
     pushText(parts, body.slice(last, idx));
     const [, tag, ref] = m as unknown as [string, string, string];
-    if (tag === "at" || tag === "reply") parts.push({ type: tag, id: ref });
+    if (tag === "at" || tag === "reply" || tag === "face") parts.push({ type: tag, id: ref });
     else parts.push({ type: "media", kind: tag as "sticker" | "image" | "video", ref });
     last = idx + m[0].length;
   }

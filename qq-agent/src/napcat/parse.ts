@@ -56,11 +56,18 @@ export function parseMessage(ev: Pick<MessageEvent, "message" | "self_id">): Par
         break;
       case "record":
         media.push({ kind: "record", url: asStr(d.url), file: asStr(d.file) });
-        parts.push("[语音]");
+        parts.push(`[语音 file=${d.file ?? ""}]`);
         break;
       case "file":
         media.push({ kind: "file", url: asStr(d.url), file: asStr(d.file) });
-        parts.push(`[文件:${d.name ?? d.file ?? ""}]`);
+        parts.push(`[文件:${d.name ?? d.file ?? ""} file=${d.file ?? ""}]`);
+        break;
+      case "forward":
+        parts.push(`[合并转发 id=${d.id ?? ""}]`);
+        break;
+      case "json":
+      case "xml":
+        parts.push(`[卡片:${cardTitle(d.data)}]`);
         break;
       case "face":
         parts.push(`[QQ表情:${d.id}]`);
@@ -71,6 +78,17 @@ export function parseMessage(ev: Pick<MessageEvent, "message" | "self_id">): Par
   }
 
   return { text: parts.join("").trim(), media, mentionsSelf, mentionsAll, replyToId };
+}
+
+/** 从 json 卡片里取一个能看懂的标题 */
+function cardTitle(data: unknown): string {
+  try {
+    const o = JSON.parse(String(data));
+    const meta = o.meta && typeof o.meta === "object" ? (Object.values(o.meta)[0] as Record<string, unknown> | undefined) : undefined;
+    return String(o.prompt ?? meta?.title ?? meta?.desc ?? o.app ?? "卡片").slice(0, 60);
+  } catch {
+    return "卡片";
+  }
 }
 
 function asStr(v: unknown): string | undefined {
@@ -88,4 +106,5 @@ export const seg = {
   reply: (id: number | string): Segment => ({ type: "reply", data: { id: String(id) } }),
   image: (file: string): Segment => ({ type: "image", data: { file } }),
   video: (file: string): Segment => ({ type: "video", data: { file } }),
+  face: (id: number | string): Segment => ({ type: "face", data: { id: String(id) } }),
 };

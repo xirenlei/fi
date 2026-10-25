@@ -14,6 +14,8 @@ import { TaskStore } from "./opencode/tasks";
 import { openCodePromptSection, openCodeTools } from "./opencode/tools";
 import { accountPromptSection, accountTools } from "./tools/account";
 import { chatTools } from "./tools/chat";
+import { qqApiPromptSection, qqApiTools } from "./tools/qqapi";
+import { loadCatalog } from "./napcat/catalog";
 import { systemTools } from "./tools/system";
 
 export interface App {
@@ -46,6 +48,7 @@ export function createApp(cfg: Config = loadConfig()): App {
     ...systemTools(() => oc.workdir()),
     ...accountTools({ call: (action, params) => napcat.call(action, params), store }),
     ...chatTools({ db, say: (space, raw) => agent.say(space, raw) }),
+    ...qqApiTools({ call: (action, params) => napcat.call(action, params) }),
   ]);
   const agent = new Agent({
     cfg: () => cfg,
@@ -54,7 +57,7 @@ export function createApp(cfg: Config = loadConfig()): App {
     llm,
     tools,
     media,
-    extraSections: () => [openCodePromptSection(cfg.opencode.workdir), accountPromptSection()],
+    extraSections: () => [openCodePromptSection(cfg.opencode.workdir), accountPromptSection(), qqApiPromptSection(loadCatalog().length)],
     log,
   });
 

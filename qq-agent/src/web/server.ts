@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { App } from "../app";
 import { configPath, dataDir, mergeConfig, saveConfig, type Config } from "../config";
@@ -52,6 +52,46 @@ function tail(path: string, lines: number): string {
   const buf = readFileSync(path);
   const text = buf.subarray(Math.max(0, size - 256 * 1024)).toString("utf8");
   return text.split("\n").slice(-lines).join("\n");
+}
+
+/** 读安装脚本写下的 install.env(KEY='value' 每行一个) */
+export function readInstallEnv(dir = dataDir()): Record<string, string> {
+  const path = join(dir, "install.env");
+  if (!existsSync(path)) return {};
+  const out: Record<string, string> = {};
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const m = line.match(/^([A-Z_]+)='(.*)'$/);
+    if (m) out[m[1]!] = m[2]!;
+  }
+  return out;
+}
+
+export interface UpdateInfo {
+  supported: boolean;
+  reason?: string;
+  current?: { hash: string; subject: string; date: string };
+  behind?: number;
+  commits?: string[];
+  running: boolean;
+}
+
+const updateLock = () => join(dataDir(), "run", "update.lock");
+
+/** 当前版本,以及远端有没有新提交(会 fetch 一次) */
+export async function checkUpdate(): Promise<UpdateInfo> {
+  const env = readInstallEnv();
+  const repo = env.APP_DIR ? join(env.APP_DIR, "repo") : "";
+  const running = existsSync(updateLock());
+  if (!repo || !existsSync(join(repo, ".git"))) return { supported: false, reason: "不是通过仓库安装的(本地目录安装),请重新运行安装命令来更新", running };
+  const git = (args: string) => runShell(`git -C '${repo}' ${args}`, repo, 30_000);
+  const fetched = await git(`fetch -q --depth 100 origin '${env.BRANCH || "main"}'`);
+  if (fetched.code !== 0) return { supported: true, reason: `获取远端信息失败:${fetched.output.slice(0, 200)}`, running };
+  const cur = await git(`log -1 --format=%h%x09%cs%x09%s HEAD`);
+  const [hash = "", date = "", ...subject] = cur.output.split("\t");
+  const log = await git(`log --format='%h %s' HEAD..FETCH_HEAD`);
+  if (log.code !== 0) return { supported: true, reason: `比较版本失败:${log.output.slice(0, 200)}`, running };
+  const commits = log.output.split("\n").filter(Boolean);
+  return { supported: true, current: { hash, date, subject: subject.join("\t") }, behind: commits.length, commits, running };
 }
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
@@ -159,6 +199,27 @@ export function startWeb(app: App, port = app.cfg.web.port) {
         if (!["image", "sticker", "video"].includes(b.kind) || (item.kind === "video") !== (b.kind === "video")) return bad("kind 不合法");
         return json(app.store.setKind(item.id, b.kind));
       }
+    }
+
+    if (p === "/api/update/check" && m === "GET") return json(await checkUpdate());
+    if (p === "/api/update/log" && m === "GET") {
+      return json({ running: existsSync(updateLock()), text: tail(join(dataDir(), "logs", "update.log"), 200) });
+    }
+    if (p === "/api/update/run" && m === "POST") {
+      const env = readInstallEnv();
+      const ctl = process.env.QQ_AGENT_CTL || (env.APP_DIR ? join(process.env.HOME ?? "", ".local", "bin", "qq-agent") : "");
+      if (!ctl || !existsSync(ctl)) return bad("找不到 qq-agent 命令,无法更新", 500);
+      if (existsSync(updateLock())) return bad("已经有更新在进行中", 409);
+      const log = join(dataDir(), "logs", "update.log");
+      // 更新过程会重启 Agent 自己,所以必须让它脱离当前进程组/服务运行
+      const quoted = `'${ctl}' update >> '${log}' 2>&1`;
+      const useSystemd = (await runShell("systemctl --user show-environment >/dev/null 2>&1", dataDir(), 5000)).code === 0;
+      const launch = useSystemd
+        ? `systemd-run --user --collect --quiet --unit=qq-agent-update --setenv=QQ_AGENT_HOME='${dataDir()}' bash -c "${quoted.replace(/"/g, '\\"')}"`
+        : `setsid nohup bash -c "${quoted.replace(/"/g, '\\"')}" >/dev/null 2>&1 &`;
+      writeFileSync(log, `[${new Date().toLocaleString("zh-CN", { hour12: false })}] 开始更新\n`);
+      const r = await runShell(launch, dataDir(), 10_000);
+      return json({ ok: r.code === 0, output: r.output });
     }
 
     if (p === "/api/proactive/run" && m === "POST") {
